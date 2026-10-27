@@ -1,0 +1,1229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Context Lens · Agent 上下文透视</title>
+<style>
+  :root{
+    --bg:#F4F2ED; --card:#FFFFFF; --line:#E7E3D9; --line2:#F0EDE5;
+    --ink:#1F2328; --muted:#6E7681; --faint:#9AA1AB;
+    --indigo:#6366F1; --green:#22C55E; --sky:#0EA5E9;
+    --purple:#A855F7; --amber:#F59E0B; --rose:#F43F5E;
+    --shadow:0 1px 2px rgba(31,35,40,.04), 0 4px 14px rgba(31,35,40,.045);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--ink);
+    font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .num{font-variant-numeric:tabular-nums}
+  .muted{color:var(--muted)}
+  .faint{color:var(--faint)}
+  .tiny{font-size:11px}
+
+  /* ── 顶栏 ── */
+  .topbar{
+    position:sticky; top:0; z-index:20;
+    background:rgba(244,242,237,.92); backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--line);
+    padding:10px 20px 0;
+  }
+  .topbar .row1{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:650;font-size:13.5px}
+  .logo{width:20px;height:20px;border-radius:6px;background:linear-gradient(135deg,#6366F1,#A855F7);
+        display:grid;place-items:center;color:#fff;font-size:11px;font-weight:700}
+  .sess-title{font-weight:600;font-size:14px;max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .spacer{flex:1}
+  select{
+    appearance:none; background:#fff; border:1px solid var(--line); border-radius:8px;
+    padding:6px 26px 6px 10px; font:inherit; font-size:12px; color:var(--ink); max-width:340px;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M2 4l3 3 3-3' fill='none' stroke='%236E7681' stroke-width='1.3'/></svg>");
+    background-repeat:no-repeat; background-position:right 8px center; cursor:pointer;
+  }
+  .tabs{display:flex;gap:2px;margin-top:8px}
+  .tab{
+    padding:7px 14px 9px; font-size:13px; color:var(--muted); cursor:pointer;
+    border-bottom:2px solid transparent; user-select:none;
+  }
+  .tab:hover{color:var(--ink)}
+  .tab.on{color:var(--ink);font-weight:600;border-bottom-color:var(--ink)}
+  .tab.dim{opacity:.38;cursor:not-allowed}
+
+  main{padding:16px 20px 40px;max-width:1560px;margin:0 auto}
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:12px;
+    box-shadow:var(--shadow); padding:12px 14px 14px; min-width:0;
+  }
+  .card h3{
+    margin:0 0 10px; font-size:12.5px; font-weight:600; color:var(--ink);
+    display:flex; align-items:center; gap:8px; letter-spacing:.2px;
+  }
+  .card h3 .hint{font-weight:400;color:var(--faint);font-size:11px;margin-left:auto}
+
+  .grid{display:grid;gap:12px}
+  .g-kpi{grid-template-columns:1.15fr .62fr .9fr 1.15fr 1.05fr}
+  .g-3{grid-template-columns:1fr 1fr 1.12fr;margin-top:12px}
+  .g-2{grid-template-columns:1fr 1fr;margin-top:12px}
+  .g-fleet{grid-template-columns:1.42fr 1fr;margin-top:12px}
+  @media (max-width:1240px){
+    .g-kpi{grid-template-columns:1fr 1fr}
+    .g-3,.g-2,.g-fleet{grid-template-columns:1fr}
+  }
+
+  /* KPI */
+  .kpi{display:flex;flex-direction:column;gap:6px}
+  .kpi .big{font-size:19px;font-weight:650;letter-spacing:-.2px}
+  .kv{display:flex;justify-content:space-between;gap:10px;font-size:12px}
+  .kv .k{color:var(--muted)}
+  .kv .v{font-weight:600}
+  .chip{
+    display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border-radius:999px;
+    background:#F1EFE8;color:var(--muted);font-size:10.5px;font-weight:600;
+  }
+  .chip.g{background:#E8F7EE;color:#17864A}
+  .chip.b{background:#E8F0FE;color:#1D4ED8}
+
+  /* donut */
+  .donut-wrap{display:flex;align-items:center;gap:14px}
+  .donut{flex:0 0 auto;position:relative}
+  .donut .ctr{position:absolute;inset:0;display:grid;place-items:center;text-align:center;line-height:1.15}
+  .donut .ctr b{font-size:15px;font-weight:650;display:block}
+  .donut .ctr span{font-size:9.5px;color:var(--faint)}
+  .legend{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+  .lg{display:flex;align-items:center;gap:6px;font-size:11.5px;min-width:0}
+  .dot{width:7px;height:7px;border-radius:2px;flex:0 0 auto}
+  .lg .nm{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lg .vv{margin-left:auto;font-weight:600;font-size:11px}
+
+  /* 堆叠条 */
+  .stack{display:flex;height:14px;border-radius:4px;overflow:hidden;background:#F1EFE8}
+  .stack i{display:block;height:100%}
+  .bar-outer{position:relative;height:16px;border-radius:5px;background:#EFEDE6;overflow:hidden}
+  .bar-outer .fill{position:absolute;left:0;top:0;bottom:0;display:flex}
+  .bar-outer .fill i{height:100%}
+  .hatch{
+    position:absolute;top:0;bottom:0;right:0;
+    background:repeating-linear-gradient(45deg,#DCD8CC 0 3px,#EFEDE6 3px 6px);
+  }
+
+  /* 浏览器 */
+  .brow{max-height:340px;overflow:auto;margin:-2px -4px 0;padding:0 4px}
+  .bgroup{margin-bottom:4px}
+  .bhead{
+    display:flex;align-items:center;gap:7px;padding:5px 6px;border-radius:6px;cursor:pointer;
+    font-size:11.5px;user-select:none;
+  }
+  .bhead:hover{background:#FAF9F5}
+  .bhead .cnt{color:var(--faint);font-size:10.5px}
+  .bhead .sum{margin-left:auto;font-weight:600;font-size:11px}
+  .bitem{
+    display:flex;align-items:baseline;gap:7px;padding:3px 6px 3px 20px;font-size:11px;
+    color:var(--muted);cursor:pointer;border-radius:5px;
+  }
+  .bitem:hover{background:#FAF9F5;color:var(--ink)}
+  .bitem .tk{margin-left:auto;color:var(--faint);font-size:10.5px;flex:0 0 auto}
+  .bitem .tx{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+  .bitem.open{background:#FAF9F5;color:var(--ink);align-items:flex-start}
+  .bitem.open .tx{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10.5px;line-height:1.45}
+
+  /* 趋势图 */
+  .chart-host{position:relative}
+  .chart-host svg{display:block;width:100%}
+  .tip{
+    position:absolute;pointer-events:none;background:#1F2328;color:#fff;border-radius:7px;
+    padding:7px 9px;font-size:11px;line-height:1.5;opacity:0;transition:opacity .1s;
+    box-shadow:0 6px 20px rgba(0,0,0,.22);z-index:9;white-space:nowrap;
+  }
+  .seg-btns{display:inline-flex;background:#F1EFE8;border-radius:7px;padding:2px}
+  .seg-btns button{
+    border:0;background:transparent;font:inherit;font-size:11px;color:var(--muted);
+    padding:3px 9px;border-radius:5px;cursor:pointer;
+  }
+  .seg-btns button.on{background:#fff;color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.07)}
+
+  .live{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--faint);
+        background:#F1EFE8;border-radius:999px;padding:3px 9px;user-select:none;white-space:nowrap}
+  .live i{width:6px;height:6px;border-radius:50%;background:#C3BFB2;display:block}
+  .live.on{background:#E8F7EE;color:#17864A}
+  .live.on i{background:#22C55E;box-shadow:0 0 0 0 rgba(34,197,94,.6);animation:pulse 2s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.5)}70%{box-shadow:0 0 0 6px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}
+  .estmark{color:#B45309;background:#FEF3E2;border-radius:3px;padding:0 3px;font-size:9.5px;margin-left:3px}
+  .probe{display:flex;gap:7px;align-items:baseline;font-size:11px;padding:4px 0;border-top:1px dashed var(--line2)}
+  .probe .nm{font-weight:600;min-width:112px}
+  .probe .nt{color:var(--faint);font-size:10.5px}
+
+  .g-kpi6{grid-template-columns:repeat(6,1fr)}
+  @media (max-width:1240px){ .g-kpi6{grid-template-columns:repeat(3,1fr)} }
+  .filterbar{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+  .flabel{font-size:10.5px;color:var(--faint);font-weight:600;letter-spacing:.3px}
+  .fsep{width:1px;height:18px;background:var(--line);margin:0 3px}
+  .hchip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;
+         border:1px solid var(--line);background:#fff;font-size:11.5px;cursor:pointer;color:var(--muted);user-select:none}
+  .hchip:hover{border-color:#CFCABC}
+  .hchip.on{border-color:#1F2328;color:var(--ink);font-weight:600;background:#F8F6F1}
+  .hchip .n{color:var(--faint);font-size:10.5px;font-weight:400}
+  .inp{background:#fff;border:1px solid var(--line);border-radius:8px;padding:5px 9px;
+       font:inherit;font-size:12px;min-width:170px;color:var(--ink)}
+  .inp:focus{outline:none;border-color:#C7C3F5}
+  table.sess{width:100%;border-collapse:collapse;font-size:12px}
+  table.sess th{position:sticky;top:0;background:#fff;z-index:1;text-align:left;font-weight:600;
+       color:var(--faint);font-size:10.5px;padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+  table.sess td{padding:7px 8px;border-bottom:1px solid var(--line2);vertical-align:middle;white-space:nowrap}
+  table.sess tr.row:hover{background:#FAF9F5;cursor:pointer}
+  table.sess td.tt{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:550}
+  .mini{display:inline-block;width:52px;height:5px;border-radius:3px;background:#F1EFE8;overflow:hidden;vertical-align:middle}
+  .mini i{display:block;height:100%;background:#6366F1}
+  .badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--muted)}
+  .distrow{display:flex;align-items:center;gap:9px;margin-bottom:8px}
+  .distrow .nm{width:96px;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .distrow .bar{flex:1;height:9px;background:#F1EFE8;border-radius:3px;overflow:hidden}
+  .distrow .bar i{display:block;height:100%;border-radius:3px}
+  .distrow .vv{width:64px;text-align:right;font-size:11px;font-weight:600}
+
+  /* 编队 */
+  .net{position:relative}
+  .member{
+    display:flex;gap:9px;align-items:flex-start;padding:9px 10px;border:1px solid var(--line2);
+    border-radius:9px;margin-bottom:7px;background:#fff;
+  }
+  .member:hover{border-color:#DCD8CC}
+  .avatar{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;font-size:11px;font-weight:700;color:#fff;flex:0 0 auto}
+  .member .tt{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .member .mt{font-size:10.5px;color:var(--faint);margin-top:1px}
+  .foot{margin-top:14px;color:var(--faint);font-size:10.5px;line-height:1.7}
+  .foot code{background:#EDEAE2;padding:1px 5px;border-radius:4px;font-size:10px}
+  .empty{padding:40px;text-align:center;color:var(--faint)}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="row1">
+    <div class="brand"><span class="logo">C</span> Context Lens</div>
+    <div class="sess-title" id="sessTitle">—</div>
+    <div class="spacer"></div>
+    <span class="live" id="liveBadge"><i></i>静态快照</span>
+    <select id="sessPicker"></select>
+  </div>
+  <div class="tabs">
+    <div class="tab on" data-view="insights">总览</div>
+    <div class="tab" data-view="context">上下文</div>
+    <div class="tab" data-view="fleet">编队</div>
+  </div>
+</div>
+
+<main>
+  <!-- ═══════════ 总览（跨宿主） ═══════════ -->
+  <section id="view-insights">
+    <div class="grid g-kpi6" id="insKpi"></div>
+
+    <div class="card" style="margin-top:12px">
+      <div class="filterbar">
+        <span class="flabel">宿主</span>
+        <div id="fHosts" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+        <span class="fsep"></span>
+        <span class="flabel">工作区</span>
+        <select id="fWs" style="max-width:200px"></select>
+        <span class="flabel">时间</span>
+        <select id="fTime" style="max-width:120px">
+          <option value="all">全部</option>
+          <option value="today">今天</option>
+          <option value="7">近 7 天</option>
+          <option value="30">近 30 天</option>
+        </select>
+        <input class="inp" id="fSearch" placeholder="搜索标题 / 路径…">
+        <span class="fsep"></span>
+        <span class="flabel">排序</span>
+        <select id="fSort" style="max-width:130px">
+          <option value="recent">最近活跃</option>
+          <option value="in">计费 token</option>
+          <option value="ctx">上下文大小</option>
+          <option value="steps">步数</option>
+        </select>
+        <span class="spacer"></span>
+        <span class="tiny faint" id="fCount"></span>
+      </div>
+    </div>
+
+    <div class="grid g-2">
+      <div class="card">
+        <h3>每日用量 <span class="hint" id="dailyHint"></span></h3>
+        <div class="chart-host" id="dailyHost"><div class="tip" id="dTip"></div></div>
+      </div>
+      <div class="card">
+        <h3>宿主分布 <span class="hint">按计费 token</span></h3>
+        <div id="hostDist"></div>
+        <div class="tiny faint" style="margin-top:10px" id="hostNote"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h3>会话清单 <span class="hint">点任意一行进入该会话的上下文透视</span></h3>
+      <div style="overflow:auto;max-height:520px">
+        <table class="sess" id="sessTable"></table>
+      </div>
+    </div>
+    <div class="foot" id="insFoot"></div>
+  </section>
+
+  <!-- ═══════════ 上下文 ═══════════ -->
+  <section id="view-context" style="display:none">
+    <div class="grid g-kpi">
+      <div class="card kpi" id="kpiIO"></div>
+      <div class="card kpi" id="kpiSess"></div>
+      <div class="card kpi" id="kpiTools"></div>
+      <div class="card kpi" id="kpiNet"></div>
+      <div class="card kpi" id="kpiSrc"></div>
+    </div>
+
+    <div class="grid g-3">
+      <div class="card">
+        <h3>Token 统计 <span class="hint" id="cacheHint"></span></h3>
+        <div class="donut-wrap">
+          <div class="donut" id="donutToken"></div>
+          <div class="legend" id="legendToken"></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>耗时统计 <span class="hint" id="wallHint"></span></h3>
+        <div class="donut-wrap">
+          <div class="donut" id="donutTime"></div>
+          <div class="legend" id="legendTime"></div>
+        </div>
+        <div class="bar-outer" style="height:8px;margin-top:12px;border-radius:3px" id="timeStrip"></div>
+      </div>
+      <div class="card">
+        <h3>会话累计 <span class="hint">按供应商 usage 实报</span></h3>
+        <div class="kv" style="margin-bottom:7px"><span class="k">输入 / 输出</span><span class="v num" id="cumIO">—</span></div>
+        <div class="kv" style="margin-bottom:7px"><span class="k">缓存命中率</span><span class="v num" id="cumCache">—</span></div>
+        <div class="kv" style="margin-bottom:7px"><span class="k">估算成本</span><span class="v num" id="cumCost">—</span></div>
+        <div class="kv" style="margin-bottom:7px"><span class="k">输出速度</span><span class="v num" id="cumSpeed">—</span></div>
+        <div class="kv"><span class="k">工具调用 / 文件</span><span class="v num" id="cumTools">—</span></div>
+        <div class="kv" id="cumCreditRow" style="display:none"><span class="k">额度消耗</span><span class="v num" id="cumCredit">—</span></div>
+      </div>
+    </div>
+
+    <div class="grid g-2">
+      <div class="card">
+        <h3>当前上下文 <span class="hint" id="ctxHint"></span></h3>
+        <div id="ctxHead" style="display:flex;align-items:baseline;gap:8px;margin:0 0 8px"></div>
+        <div class="bar-outer" style="height:16px">
+          <div class="fill" id="ctxFill"></div>
+          <div class="hatch" id="ctxHatch"></div>
+        </div>
+        <div class="legend" id="legendCtx" style="margin-top:11px"></div>
+        <div class="tiny faint" style="margin-top:8px" id="ctxNote"></div>
+      </div>
+      <div class="card">
+        <h3>上下文浏览器
+          <span class="hint">
+            <span class="seg-btns" id="browMode">
+              <button class="on" data-m="group">分组</button><button data-m="dna">DNA</button>
+            </span>
+          </span>
+        </h3>
+        <div class="brow" id="browser"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h3>上下文趋势
+        <span class="hint">
+          <span class="seg-btns" id="trendMode">
+            <button class="on" data-m="total">总量</button><button data-m="delta">增量</button>
+          </span>
+        </span>
+      </h3>
+      <div class="chart-host" id="trendHost"><div class="tip" id="tip"></div></div>
+    </div>
+
+    <div class="foot" id="footNote"></div>
+  </section>
+
+  <!-- ═══════════ 编队 ═══════════ -->
+  <section id="view-fleet" style="display:none">
+    <div class="grid g-fleet">
+      <div class="card">
+        <h3>Agent 网络 <span class="hint" id="netHint"></span></h3>
+        <div class="net" id="netHost"></div>
+      </div>
+      <div class="card">
+        <h3>编队成员 <span class="hint" id="memHint"></span></h3>
+        <div id="members" style="max-height:520px;overflow:auto"></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <h3>工具调用排行 <span class="hint">当前会话 · 步数口径</span></h3>
+      <div id="toolRank"></div>
+    </div>
+    <div class="foot" id="fleetNote"></div>
+  </section>
+</main>
+
+<script src="data.js"></script>
+<script>
+const CATS = {
+  host:      {n:'系统提示词 + 工具定义', s:'宿主注入', c:'#6366F1'},
+  user:      {n:'用户消息',              s:'用户消息', c:'#22C55E'},
+  assistant: {n:'助手消息',              s:'助手消息', c:'#0EA5E9'},
+  think:     {n:'模型思考',              s:'模型思考', c:'#A855F7'},
+  targs:     {n:'工具参数',              s:'工具参数', c:'#F59E0B'},
+  tres:      {n:'工具结果',              s:'工具结果', c:'#F43F5E'}
+};
+const ORDER = ['host','user','assistant','think','targs','tres'];
+let D = window.LENS_DATA;
+let REV = (D && D.rev) || null;
+let LIVE = false;
+
+let state = {
+  sid: D.active, view:'insights', browMode:'group', trendMode:'total', open:new Set(),
+  f: { hosts: new Set((D.hosts||[]).filter(h=>h.sessions>0).map(h=>h.id)),
+       ws:'all', time:'all', q:'', sort:'recent' }
+};
+const $ = s => document.querySelector(s);
+const el = (t,c,h) => { const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.innerHTML=h; return e; };
+
+/* ── 格式化 ── */
+function fmt(n){
+  n = Math.round(n||0);
+  if (Math.abs(n) >= 1e6) return (n/1e6).toFixed(2).replace(/\.00$/,'') + 'M';
+  if (Math.abs(n) >= 1e4) return (n/1e3).toFixed(1).replace(/\.0$/,'') + 'k';
+  return n.toLocaleString('en-US');
+}
+function fmtSec(s){
+  s = Math.max(0, s||0);
+  if (s < 60) return s.toFixed(1) + 's';
+  const m = Math.floor(s/60), sec = Math.round(s%60);
+  if (m < 60) return m + 'm' + String(sec).padStart(2,'0') + 's';
+  return Math.floor(m/60) + 'h' + String(m%60).padStart(2,'0') + 'm';
+}
+const pct = (a,b) => b>0 ? (a/b*100) : 0;
+const p1 = v => (v<0.05 ? '<0.1' : v.toFixed(1));
+
+/* ── 圆环 ── */
+function donut(host, segs, size, center){
+  const R = size/2, r = R - 11, C = 2*Math.PI*r;
+  const total = segs.reduce((a,b)=>a+b.v,0) || 1;
+  let off = 0, paths = '';
+  segs.forEach(s=>{
+    const len = C * (s.v/total);
+    if (len <= 0) return;
+    paths += `<circle cx="${R}" cy="${R}" r="${r}" fill="none" stroke="${s.c}" stroke-width="11"
+      stroke-dasharray="${Math.max(0,len-1.6)} ${C}" stroke-dashoffset="${-off}"
+      transform="rotate(-90 ${R} ${R})" stroke-linecap="butt"/>`;
+    off += len;
+  });
+  host.innerHTML = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+    <circle cx="${R}" cy="${R}" r="${r}" fill="none" stroke="#F1EFE8" stroke-width="11"/>${paths}</svg>
+    <div class="ctr"><b>${center[0]}</b><span>${center[1]}</span></div>`;
+}
+
+/* ── 渲染：只有索引、没有日志明细的会话 ── */
+function renderIndexOnly(s){
+  const t = s.totals;
+  $('#sessTitle').textContent = s.title;
+  $('#kpiIO').innerHTML = `<h3 style="margin:0 0 2px">输入输出</h3>
+    <div class="big num" style="color:#9AA1AB">—</div>
+    <div class="tiny faint">该会话没有可解析的日志明细</div>`;
+  $('#kpiSess').innerHTML = `<h3 style="margin:0 0 2px">当前会话</h3>
+    <div style="display:flex;gap:14px">
+      <div><div class="big num">0</div><div class="tiny faint">轮次</div></div>
+      <div><div class="big num">0</div><div class="tiny faint">步数</div></div>
+      <div><div class="big num" style="color:#9AA1AB">—</div><div class="tiny faint">缓存</div></div>
+    </div>`;
+  $('#kpiTools').innerHTML = `<h3 style="margin:0 0 2px">工具调用</h3>
+    <div class="big num" style="color:#9AA1AB">—</div><div class="tiny faint">仅索引</div>`;
+  $('#kpiNet').innerHTML = `<h3 style="margin:0 0 2px">上下文</h3>
+    <div class="kv"><span class="k">占用</span><span class="v num">${fmt(t.ctx)} / ${fmt(t.window)}</span></div>
+    <div class="kv"><span class="k">占用率</span><span class="v num">${pct(t.ctx,t.window).toFixed(1)}%</span></div>
+    <div class="kv"><span class="k">额度消耗</span><span class="v num">${s.credits!=null?s.credits:'—'}</span></div>`;
+  $('#kpiSrc').innerHTML = `<h3 style="margin:0 0 2px">数据来源</h3>
+    <div class="kv"><span class="k">宿主</span><span class="v num"><i class="dot" style="background:${hostColor(s.host)};display:inline-block;margin-right:4px"></i>${hostName(s.host)}</span></div>
+    <div class="kv"><span class="k">来源</span><span class="v" style="font-size:11px">桌面端索引 workbuddy.db</span></div>
+    <div class="kv"><span class="k">工作区</span><span class="v num" style="font-size:11px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(s.cwd||'').split(/[\\/]/).pop()}</span></div>
+    <div class="kv"><span class="k">最后活跃</span><span class="v num">${s.endTs?new Date(s.endTs).toLocaleDateString('zh-CN'):'—'}</span></div>`;
+
+  $('#donutToken').innerHTML = `<div style="width:108px;height:108px;display:grid;place-items:center;
+    border-radius:50%;border:11px solid #F1EFE8;font-size:11px;color:#9AA1AB">无明细</div>`;
+  $('#cacheHint').textContent = '—';
+  $('#legendToken').innerHTML = ORDER.map(k=>`<div class="lg"><i class="dot" style="background:${CATS[k].c};opacity:.3"></i>
+    <span class="nm">${CATS[k].n}</span><span class="vv num faint">—</span></div>`).join('');
+  $('#donutTime').innerHTML = `<div style="width:108px;height:108px;display:grid;place-items:center;
+    border-radius:50%;border:11px solid #F1EFE8;font-size:11px;color:#9AA1AB">无明细</div>`;
+  $('#wallHint').textContent = '—';
+  $('#legendTime').innerHTML = '';
+  $('#timeStrip').innerHTML = '';
+  $('#cumIO').textContent = '—';
+  $('#cumCache').textContent = '—';
+  $('#cumCost').textContent = '—';
+  $('#cumSpeed').textContent = '—';
+  $('#cumTools').textContent = '—';
+  $('#cumCreditRow').style.display = s.credits ? '' : 'none';
+  if (s.credits) $('#cumCredit').textContent = `${s.credits} 额度`;
+
+  $('#ctxHint').innerHTML = `<span class="num">${fmt(t.window)} tokens 窗口</span>`;
+  $('#ctxHead').innerHTML = `<span class="num" style="font-size:22px;font-weight:650">${fmt(t.ctx)}</span>
+    <span class="muted" style="font-size:12px">/ ${fmt(t.window)} tokens</span>
+    <span class="chip b" style="margin-left:auto">${pct(t.ctx,t.window).toFixed(1)}% 已用</span>`;
+  $('#ctxFill').innerHTML = `<i style="width:${pct(t.ctx,t.window)}%;background:#6366F1"></i>`;
+  $('#ctxHatch').style.width = '20%';
+  $('#legendCtx').innerHTML = '<div class="tiny faint">该会话只有桌面端索引记录（占用/窗口/额度），没有逐条请求日志，因此无法拆分构成。</div>';
+  $('#ctxNote').innerHTML = '';
+  $('#browser').innerHTML = '<div class="empty">无日志明细</div>';
+  $('#trendHost').innerHTML = '<div class="empty" style="padding:30px">无日志明细，无法还原趋势</div>';
+  renderFleet(s);
+  $('#footNote').innerHTML = `数据来自 <code>~/.workbuddy-ai/workbuddy.db</code> 的 sessions / session_usage 表 · 只读`;
+}
+
+/* ── 渲染：KPI ── */
+function render(s){
+  if (!s.requests || !s.requests.length) return renderIndexOnly(s);
+  const t = s.totals, tm = s.timing, last = s.requests[s.requests.length-1];
+  const hit = pct(t.cached, t.in);
+
+  $('#sessTitle').textContent = s.title;
+  $('#kpiIO').innerHTML = `
+    <h3 style="margin:0 0 2px">输入输出</h3>
+    <div class="big num">${fmt(t.in)} <span class="muted" style="font-size:12px;font-weight:400">in</span>
+      <span style="color:#D8D4C8">/</span> ${fmt(t.out)} <span class="muted" style="font-size:12px;font-weight:400">out</span></div>
+    <div class="kv"><span class="k">文件 读 / 写 / 搜</span><span class="v num">${s.files.read} / ${s.files.write} / ${s.files.search}</span></div>
+    <div class="kv"><span class="k">会话跨度</span><span class="v num">${fmtSec(s.wallSec)}</span></div>`;
+
+  $('#kpiSess').innerHTML = `
+    <h3 style="margin:0 0 2px">当前会话</h3>
+    <div style="display:flex;gap:14px">
+      <div><div class="big num">${s.turns}</div><div class="tiny faint">轮次</div></div>
+      <div><div class="big num">${s.steps}</div><div class="tiny faint">步数</div></div>
+      <div><div class="big num" style="color:${s.est?'#9AA1AB':(hit>80?'#17864A':'#B45309')}">${s.est?'—':hit.toFixed(1)+'<span style="font-size:11px">%</span>'}</div><div class="tiny faint">${s.est?'无缓存数据':'缓存命中'}</div></div>
+    </div>`;
+
+  const tk = Object.entries(s.tools).slice(0,3);
+  $('#kpiTools').innerHTML = `
+    <h3 style="margin:0 0 2px">工具调用 <span class="hint num">${s.toolCount}</span></h3>
+    ${tk.map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v num">${v}</span></div>`).join('')}
+    ${Object.keys(s.tools).length>3?`<div class="kv"><span class="k faint">其他 ${Object.keys(s.tools).length-3} 种</span><span class="v num faint">${s.toolCount-tk.reduce((a,[,v])=>a+v,0)}</span></div>`:''}`;
+
+  $('#kpiNet').innerHTML = `
+    <h3 style="margin:0 0 2px">Agent 网络</h3>
+    <div class="kv"><span class="k">当前会话</span><span class="v num">${fmt(t.in+t.out)} · ¥${t.cost.toFixed(2)}</span></div>
+    <div class="kv"><span class="k">上下文占用</span><span class="v num">${fmt(t.ctx)} / ${fmt(t.window)}</span></div>
+    <div class="kv"><span class="k">同工作区会话</span><span class="v num">${sameProj(s).length} 个</span></div>
+    <div class="kv"><span class="k">子 Agent</span><span class="v num faint">0（本宿主无谱系事件）</span></div>`;
+
+  $('#kpiSrc').innerHTML = `
+    <h3 style="margin:0 0 2px">数据来源</h3>
+    <div class="kv"><span class="k">宿主</span><span class="v num"><i class="dot" style="background:${hostColor(s.host)};display:inline-block;margin-right:4px"></i>${hostName(s.host)}</span></div>
+    <div class="kv"><span class="k">会话日志</span><span class="v num" style="font-size:11px">${s.id.slice(0,8)}…</span></div>
+    <div class="kv"><span class="k">工作区</span><span class="v num" style="font-size:11px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${s.cwd}">${(s.cwd||'').split(/[\\/]/).pop()}</span></div>
+    <div class="kv"><span class="k">采样</span><span class="v num">${D.generatedAt}</span></div>
+    ${s.est?'<div class="kv"><span class="k">用量</span><span class="v" style="color:#B45309;font-size:11px">估算 · 宿主未上报</span></div>':''}`;
+
+  /* Token 圆环 */
+  const comp = last.comp;
+  const segs = ORDER.map(k=>({v:comp[k]||0, c:CATS[k].c}));
+  donut($('#donutToken'), segs, 108, [fmt(last.in), '本次请求']);
+  $('#cacheHint').textContent = s.est ? '宿主未上报 usage' : `缓存命中 ${hit.toFixed(2)}%`;
+  $('#legendToken').innerHTML = ORDER.map(k=>{
+    const v = comp[k]||0;
+    return `<div class="lg"><i class="dot" style="background:${CATS[k].c}"></i>
+      <span class="nm">${CATS[k].n}</span>
+      <span class="vv num">≈${fmt(v)} <span class="faint" style="font-weight:400">${p1(pct(v,t.ctx))}%</span></span></div>`;
+  }).join('') + `<div class="lg" style="margin-top:2px"><i class="dot" style="background:#DCD8CC"></i>
+      <span class="nm">输出（本次请求）</span><span class="vv num">${fmt(last.out)}</span></div>`;
+
+  /* 耗时 */
+  const tsegs = [
+    {v:tm.model, c:'#6366F1', n:'模型耗时'},
+    {v:tm.tool,  c:'#F59E0B', n:'工具执行'},
+    {v:tm.idle,  c:'#DCD8CC', n:'空档（含人工等待）'}
+  ];
+  const tot = tsegs.reduce((a,b)=>a+b.v,0)||1;
+  donut($('#donutTime'), tsegs, 108, [fmtSec(s.wallSec), '活跃时长']);
+  $('#wallHint').textContent = '按事件时间戳拆解';
+  $('#legendTime').innerHTML = tsegs.map(x=>`<div class="lg"><i class="dot" style="background:${x.c}"></i>
+    <span class="nm">${x.n}</span><span class="vv num">${p1(x.v/tot*100)}%</span></div>`).join('')
+    + `<div class="lg"><span class="nm faint">平均每步</span><span class="vv num">${fmtSec(tot/s.steps)}</span></div>`;
+
+  /* 时间轴条：每步耗时 */
+  const rs = s.requests.slice(-70);
+  const maxMs = Math.max(1, ...rs.map(r=>r.ms + r.toolMs));
+  const w = 100/rs.length;
+  $('#timeStrip').innerHTML = rs.map((r,i)=>{
+    const mh = (r.ms/maxMs)*100, th = (r.toolMs/maxMs)*100;
+    return `<i style="position:absolute;left:${i*w}%;width:${w}%;height:100%">
+      <span style="position:absolute;left:0;bottom:0;width:100%;height:${mh}%;background:#6366F1;opacity:.85"></span>
+      <span style="position:absolute;left:0;top:0;width:100%;height:${th}%;background:#F59E0B"></span></i>`;
+  }).join('');
+  $('#timeStrip').style.position='relative';
+
+  /* 会话累计 */
+  $('#cumIO').textContent = `${s.est?'≈':''}${fmt(t.in)} / ${s.est?'≈':''}${fmt(t.out)}`;
+  $('#cumCache').textContent = s.est ? '— 宿主未上报' : `${hit.toFixed(2)}%  (${fmt(t.cached)} 命中)`;
+  $('#cumCost').textContent = s.est ? '—' : `¥${t.cost.toFixed(2)}（估算）`;
+  $('#cumSpeed').textContent = s.est ? '—' : `${Math.round(t.out / Math.max(1, tm.model))} tok/s`;
+  $('#cumTools').textContent = `${s.toolCount} / ${s.files.read+s.files.write+s.files.search}`;
+  const cr = s.credits;
+  $('#cumCreditRow').style.display = cr ? '' : 'none';
+  if (cr) $('#cumCredit').textContent = `${cr} 额度`;
+
+  /* 当前上下文 */
+  const used = t.ctx, win = t.window, reserve = win*0.2;
+  const usedPct = pct(used, win);
+  $('#ctxHint').innerHTML = `<span class="num">${fmt(win)} tokens 窗口</span>`;
+  $('#ctxHead').innerHTML = `
+    <span class="num" style="font-size:22px;font-weight:650;letter-spacing:-.4px">${fmt(used)}</span>
+    <span class="muted" style="font-size:12px">/ ${fmt(win)} tokens</span>
+    <span class="chip ${usedPct>70?'':'b'}" style="margin-left:auto">${usedPct.toFixed(1)}% 已用 · 余 ${fmt(win-used)}</span>`;
+  $('#ctxFill').innerHTML = ORDER.map(k=>{
+    const v = comp[k]||0;
+    return `<i style="width:${pct(v,win)}%;background:${CATS[k].c}"></i>`;
+  }).join('');
+  $('#ctxHatch').style.width = (reserve/win*100)+'%';
+  $('#legendCtx').innerHTML = ORDER.map(k=>{
+    const v = comp[k]||0;
+    return `<div class="lg"><i class="dot" style="background:${CATS[k].c}"></i>
+      <span class="nm">${CATS[k].n}</span>
+      <span class="vv num">≈${fmt(v)} <span class="faint" style="font-weight:400">${p1(pct(v,used))}%</span></span></div>`;
+  }).join('');
+  $('#ctxNote').innerHTML = `斜纹 = 自动压缩预留（窗口 20%）。宿主注入为实测差额推算，其余按字符密度估算后以实报 input 归一。`;
+
+  /* 有官方口径时覆盖为实报（豆包工作 context_window_usage） */
+  const rc = s.realCtx;
+  if (rc){
+    const RC = [['系统提示词', rc.system, '#6366F1'],
+                ['对话消息',   rc.messages, '#0EA5E9'],
+                ['技能',       rc.skills, '#A855F7'],
+                ['工具定义',   rc.tools, '#F59E0B']];
+    $('#ctxHead').innerHTML = `
+      <span class="num" style="font-size:22px;font-weight:650;letter-spacing:-.4px">${fmt(rc.total)}</span>
+      <span class="muted" style="font-size:12px">/ ${fmt(rc.window || t.window)} tokens</span>
+      <span class="chip g" style="margin-left:auto">官方口径 ${pct(rc.total, rc.window||t.window).toFixed(1)}% 已用</span>`;
+    $('#ctxFill').innerHTML = RC.map(([n,v,c])=>
+      `<i style="width:${pct(v, rc.window||t.window)}%;background:${c}"></i>`).join('');
+    $('#legendCtx').innerHTML = RC.map(([n,v,c])=>`<div class="lg">
+      <i class="dot" style="background:${c}"></i><span class="nm">${n}</span>
+      <span class="vv num">${fmt(v)} <span class="faint" style="font-weight:400">${p1(pct(v,rc.total))}%</span></span></div>`).join('');
+    $('#ctxNote').innerHTML = `数据来自豆包工作官方 <code>context_window_usage</code>（实报，非估算）。
+      逐条请求的 token 仍为估算，因为宿主不上报 usage。`;
+  }
+
+  renderBrowser(s);
+  renderTrend(s);
+  renderFleet(s);
+
+  $('#footNote').innerHTML = `数据：<code>~/.workbuddy-ai/projects/*/*.jsonl</code> · 只读 ·
+    单价假设 缓存 ¥${D.price.cache}/M、输入 ¥${D.price.input}/M、输出 ¥${D.price.output}/M（可在 <code>collect.py</code> 顶部改）·
+    上下文窗口按 ${fmt(D.contextWindow)} 计`;
+}
+
+/* ── 上下文浏览器 ── */
+function renderBrowser(s){
+  const host = $('#browser');
+  const items = s.browser;
+  if (!items.length){ host.innerHTML = '<div class="empty">无记录</div>'; return; }
+  const last = s.requests[s.requests.length-1];
+  const prev = s.requests[s.requests.length-2];
+
+  if (state.browMode === 'dna'){
+    const rev = [...items].reverse();
+    host.innerHTML = rev.map((b,i)=>{
+      const k = 'dna'+i;
+      return `<div class="bitem" data-k="${k}"><i class="dot" style="background:${CATS[b.cat].c}"></i>
+        <span class="tx">${esc(b.label)} · ${esc(b.preview.slice(0,70))}</span>
+        <span class="tk num">#${b.step} · ${fmt(b.tok)}</span></div>
+        <div class="bitem" data-body="${k}" style="display:none"><span class="tx">${esc(b.preview)}</span></div>`;
+    }).join('');
+    bindItems(host);
+    return;
+  }
+
+  const groups = {};
+  items.forEach(b=>{ (groups[b.cat] ||= []).push(b); });
+  let html = `<div class="bgroup">
+      <div class="bhead" data-g="host" style="cursor:default">
+        <i class="dot" style="background:${CATS.host.c}"></i>
+        <span>${CATS.host.n}</span><span class="cnt">1 项</span>
+        <span class="sum num">≈${fmt(last.comp.host)} · ${p1(pct(last.comp.host,last.in))}%</span>
+      </div>
+      <div class="bitem" data-k="host"><span class="tx">系统提示词 + 全部工具 JSON Schema（宿主注入，未落盘，按差额推算）</span>
+        <span class="tk num">≈${fmt(last.comp.host)}</span></div>
+    </div>`;
+
+  ORDER.filter(k=>k!=='host' && groups[k]).forEach(k=>{
+    const g = groups[k], sum = g.reduce((a,b)=>a+b.tok,0);
+    const d = prev ? (last.comp[k]||0) - (prev.comp[k]||0) : 0;
+    const badge = (d>0?`<span class="chip g">+${fmt(d)}</span>`:(d<0?`<span class="chip">${fmt(d)}</span>`:''));
+    html += `<div class="bgroup">
+      <div class="bhead" data-g="${k}">
+        <i class="dot" style="background:${CATS[k].c}"></i>
+        <span>${CATS[k].n}</span><span class="cnt">${g.length} 项</span>
+        <span class="sum num">≈${fmt(last.comp[k])} · ${p1(pct(last.comp[k],last.in))}%</span>
+      </div>
+      ${g.slice().sort((a,b)=>b.tok-a.tok).slice(0,14).map((b,i)=>{
+        const kk = k+i;
+        return `<div class="bitem" data-k="${kk}"><i class="dot" style="background:${CATS[k].c};opacity:.5"></i>
+          <span class="tx">${esc(b.preview.slice(0,84).replace(/\n/g,' '))}</span>
+          <span class="tk num">#${b.step} · ${fmt(b.tok)}</span></div>
+          <div class="bitem" data-body="${kk}" style="display:none"><span class="tx">${esc(b.preview)}</span></div>`;
+      }).join('')}
+      ${g.length>14?`<div class="bitem faint" style="cursor:default;padding-left:20px">…另有 ${g.length-14} 项</div>`:''}
+    </div>`;
+  });
+  host.innerHTML = html;
+  bindItems(host);
+}
+function bindItems(host){
+  host.querySelectorAll('.bitem[data-k]').forEach(n=>{
+    n.onclick = ()=>{
+      const body = host.querySelector(`.bitem[data-body="${n.dataset.k}"]`);
+      if (!body) return;
+      const open = body.style.display !== 'none';
+      body.style.display = open ? 'none' : 'flex';
+      n.classList.toggle('open', !open);
+    };
+  });
+}
+
+/* ── 趋势图 ── */
+function renderTrend(s){
+  const host = $('#trendHost');
+  const rs = s.requests.slice(-90);
+  if (!rs.length) return;
+  const W = Math.max(560, host.clientWidth || 900), H = 210;
+  const padL = 44, padR = 8, padT = 10, padB = 22;
+  const iw = W-padL-padR, ih = H-padT-padB;
+  const n = rs.length;
+  const deltaMode = state.trendMode === 'delta';
+  const vals = rs.map((r,i)=> deltaMode ? (r.in - (rs[i-1]?.in ?? 0)) : r.in);
+  const maxV = Math.max(1, ...vals);
+  const minV = deltaMode ? Math.min(0, ...vals) : 0;
+  const span = maxV - minV || 1;
+  const bw = Math.max(2, Math.min(14, iw/n*0.72));
+  const y0 = padT + ih * (maxV/span);
+  const Y = v => padT + ih * ((maxV - v)/span);
+
+  let g = '';
+  // grid
+  for (let i=0;i<=3;i++){
+    const v = maxV - span*i/3, y = Y(v);
+    g += `<line x1="${padL}" x2="${W-padR}" y1="${y}" y2="${y}" stroke="#F0EDE5"/>
+      <text x="${padL-6}" y="${y+3.5}" text-anchor="end" font-size="9.5" fill="#9AA1AB">${fmt(v)}</text>`;
+  }
+  if (deltaMode) g += `<line x1="${padL}" x2="${W-padR}" y1="${y0}" y2="${y0}" stroke="#DCD8CC"/>`;
+
+  let bars = '';
+  rs.forEach((r,i)=>{
+    if (deltaMode && i===0) return;   // 首个请求无"上一步"可比
+    const x = padL + (iw/n)*i + (iw/n - bw)/2;
+    if (deltaMode){
+      const v = vals[i], y = Y(v), h = Math.abs(y0-y);
+      bars += `<rect x="${x}" y="${Math.min(y,y0)}" width="${bw}" height="${Math.max(1,h)}" rx="1.5"
+        fill="${v>=0?'#6366F1':'#F43F5E'}" opacity=".85"/>`;
+    } else {
+      let acc = 0;
+      ORDER.forEach(k=>{
+        const v = r.comp[k]||0, h = ih*(v/span);
+        if (h<=0) return;
+        bars += `<rect x="${x}" y="${Y(acc+v)}" width="${bw}" height="${Math.max(0.6,h)}"
+          fill="${CATS[k].c}" opacity=".9"/>`;
+        acc += v;
+      });
+    }
+  });
+  const lastR = rs[n-1];
+  let ticks = '';
+  const tickN = Math.min(7, n);
+  for (let i=0;i<tickN;i++){
+    const idx = Math.round(i*(n-1)/Math.max(1,tickN-1));
+    const x = padL + (iw/n)*idx + (iw/n)/2;
+    ticks += `<text x="${x}" y="${H-5}" text-anchor="middle" font-size="9.5" fill="#9AA1AB">#${rs[idx].i}</text>`;
+  }
+  host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" height="${H}">
+    ${g}${bars}${ticks}
+    <text x="${padL-6}" y="${padT+4}" text-anchor="end" font-size="9" fill="#B9B3A4">tok</text>
+  </svg><div class="tip" id="tip"></div>`;
+
+  const svg = host.querySelector('svg');
+  const tip = host.querySelector('.tip');
+  svg.onmousemove = ev=>{
+    const rect = svg.getBoundingClientRect();
+    const rel = (ev.clientX - rect.left) / rect.width * W;
+    let idx = Math.round((rel - padL - (iw/n)/2) / (iw/n));
+    idx = Math.max(0, Math.min(n-1, idx));
+    const r = rs[idx];
+    const d = idx>0 ? r.in - rs[idx-1].in : 0;
+    tip.innerHTML = `<b>#${r.i}</b> · 上下文 ${fmt(r.in)} tokens<br>
+      输出 ${fmt(r.out)} · 缓存 ${fmt(r.cached)}<br>
+      <span style="opacity:.7">${idx>0?('较上一步 '+(d>=0?'+':'')+fmt(d)):'首个请求'}</span>`;
+    tip.style.opacity = 1;
+    const px = (padL + (iw/n)*idx) / W * rect.width;
+    tip.style.left = Math.min(rect.width-150, Math.max(0, px+12)) + 'px';
+    tip.style.top = '6px';
+  };
+  svg.onmouseleave = ()=>{ tip.style.opacity = 0; };
+}
+
+/* ── 编队 ── */
+function sameProj(s){
+  return D.sessions.filter(x=>x.project===s.project && x.id!==s.id);
+}
+function renderFleet(s){
+  let kids = sameProj(s).slice(0,5);
+  let fallback = false;
+  if (!kids.length){
+    kids = D.sessions.filter(x=>x.id!==s.id).slice(0,4);
+    fallback = true;
+  }
+  const W = 660, H = kids.length ? 330 : 200, rowY = 236;
+  const cx = W/2;
+  const cardW = 168, cardH = 74;
+  const gap = kids.length ? (W - kids.length*cardW) / (kids.length+1) : 0;
+
+  const nodeCard = (x,y,w,h,title,tok,ctxPct,main) => `
+    <g>
+      <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10"
+        fill="#fff" stroke="${main?'#C7C3F5':'#E7E3D9'}" stroke-width="${main?1.4:1}"/>
+      <text x="${x+12}" y="${y+20}" font-size="11" font-weight="600" fill="#1F2328">
+        ${esc(trunc(title, main?20:16))}</text>
+      <text x="${x+12}" y="${y+38}" font-size="10.5" fill="#6E7681">${tok}</text>
+      <rect x="${x+12}" y="${y+h-18}" width="${w-24}" height="4" rx="2" fill="#F1EFE8"/>
+      <rect x="${x+12}" y="${y+h-18}" width="${Math.max(2,(w-24)*Math.min(1,ctxPct/100))}" height="4" rx="2"
+        fill="${main?'#6366F1':'#A855F7'}" opacity=".85"/>
+    </g>`;
+
+  let svg = '';
+  const cy = kids.length ? 62 : (H-cardH)/2;
+  kids.forEach((k,i)=>{
+    const x = gap*(i+1) + cardW*i;
+    svg += `<path d="M ${cx} ${cy+cardH} C ${cx} ${cy+cardH+52}, ${x+cardW/2} ${rowY-52}, ${x+cardW/2} ${rowY}"
+      fill="none" stroke="#E2DEF0" stroke-width="1.3"/>`;
+  });
+  svg += nodeCard(cx-cardW/2, cy, cardW, cardH, s.title, `${fmt(s.totals.in+s.totals.out)} · ¥${s.totals.cost.toFixed(2)}`,
+    pct(s.totals.ctx, s.totals.window), true);
+  kids.forEach((k,i)=>{
+    const x = gap*(i+1) + cardW*i;
+    svg += nodeCard(x, rowY, cardW, cardH, k.title, `${fmt(k.totals.in+k.totals.out)} · ¥${k.totals.cost.toFixed(2)}`,
+      pct(k.totals.ctx, k.totals.window), false);
+  });
+  $('#netHost').innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">${svg}</svg>`;
+  $('#netHint').textContent = fallback
+    ? '本工作区仅此 1 个会话 · 图中为最近其它会话'
+    : `${1+kids.length} 个会话 · 同一工作区`;
+
+  const all = [s, ...kids];
+  $('#members').innerHTML = all.map((x,i)=>`
+    <div class="member">
+      <div class="avatar" style="background:${i===0?'#6366F1':'#A855F7'}">${i===0?'L':i}</div>
+      <div style="flex:1;min-width:0">
+        <div class="tt" title="${esc(x.title)}">${esc(x.title)}</div>
+        <div class="mt">${i===0?'主会话':(fallback?'最近会话':'同工作区会话')} · ${x.steps} 步 · ${fmtSec(x.wallSec)} · ${fmt(x.totals.in+x.totals.out)} tok</div>
+        <div class="mt">上下文 ${fmt(x.totals.ctx)}（${pct(x.totals.ctx,x.totals.window).toFixed(1)}%）· 缓存 ${pct(x.totals.cached,x.totals.in).toFixed(0)}%</div>
+      </div>
+    </div>`).join('');
+  $('#memHint').textContent = `${all.length} 个`;
+
+  const tk = Object.entries(s.tools);
+  const maxV = Math.max(1, ...tk.map(([,v])=>v));
+  $('#toolRank').innerHTML = tk.map(([k,v])=>`
+    <div style="display:flex;align-items:center;gap:9px;margin-bottom:6px">
+      <span style="width:110px;font-size:11.5px;color:#6E7681;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${k}</span>
+      <span style="flex:1;height:8px;background:#F1EFE8;border-radius:3px;overflow:hidden">
+        <span style="display:block;height:100%;width:${v/maxV*100}%;background:linear-gradient(90deg,#6366F1,#A855F7);border-radius:3px"></span></span>
+      <span class="num" style="width:34px;text-align:right;font-size:11px;font-weight:600">${v}</span>
+    </div>`).join('');
+
+  $('#fleetNote').innerHTML = `本宿主的会话日志里没有子 Agent 谱系事件（<code>Agent</code>/<code>Task</code> 调用），
+    所以"编队"按<b>同一工作区的会话</b>聚合，而不是真实父子谱系。若日志里有 spawn 事件，这里可以直接换成树。`;
+}
+
+/* ══════════ 总览（跨宿主汇总 + 筛选） ══════════ */
+let HOSTMAP = {};
+function buildHostMap(){
+  HOSTMAP = {};
+  (D.hosts||[]).forEach(h=>HOSTMAP[h.id]=h);
+}
+buildHostMap();
+const hostName = id => (HOSTMAP[id]||{}).name || id;
+const hostColor = id => (HOSTMAP[id]||{}).color || '#9AA1AB';
+const pad2 = n => String(n).padStart(2,'0');
+const dayKey = ts => { const d=new Date(ts); return d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate()); };
+
+function filteredSessions(){
+  const f = state.f, now = Date.now();
+  const t0 = new Date(); t0.setHours(0,0,0,0);
+  return D.sessions.filter(s=>{
+    if (!f.hosts.has(s.host)) return false;
+    if (f.ws!=='all' && (s.cwd||s.project)!==f.ws) return false;
+    if (f.q){
+      const q = f.q.toLowerCase();
+      if (!((s.title+' '+(s.cwd||'')).toLowerCase().includes(q))) return false;
+    }
+    if (f.time==='today' && (!s.endTs || s.endTs < t0.getTime())) return false;
+    if (f.time==='7'  && (!s.endTs || now - s.endTs > 7*864e5)) return false;
+    if (f.time==='30' && (!s.endTs || now - s.endTs > 30*864e5)) return false;
+    return true;
+  });
+}
+
+function renderInsights(){
+  const list = filteredSessions();
+  const hostSet = state.f.hosts;
+
+  /* KPI（估算会话不计入 token/成本，避免污染缓存命中率） */
+  let tin=0, tout=0, tcached=0, cost=0, turns=0, steps=0, estN=0, estIn=0;
+  const wsSet = new Set();
+  list.forEach(s=>{
+    turns += s.turns; steps += s.steps;
+    wsSet.add(s.cwd||s.project);
+    if (s.est){ estN++; estIn += s.totals.in + s.totals.out; return; }
+    tin += s.totals.in; tout += s.totals.out; tcached += s.totals.cached;
+    cost += s.totals.cost;
+  });
+  const hit = tin ? tcached/tin*100 : 0;
+  const kpi = (t,v,sub)=>`<div class="card kpi"><h3 style="margin:0 0 2px">${t}</h3>
+      <div class="big num">${v}</div><div class="tiny faint">${sub}</div></div>`;
+  $('#insKpi').innerHTML =
+      kpi('会话', list.length, `${wsSet.size} 个工作区 · ${hostSet.size} 个宿主`)
+    + kpi('计费 token', tin? fmt(tin+tout) : (estN? '≈'+fmt(estIn) : '—'),
+          tin ? `${fmt(tin)} in / ${fmt(tout)} out` + (estN?`<br>另有 ${estN} 个估算会话 ≈${fmt(estIn)} 未计入`:'')
+              : `${estN} 个会话均为估算（宿主不上报 usage）`)
+    + kpi('估算成本', '¥'+cost.toFixed(2), tin? '按配置单价 · 仅实报会话' : '无实报会话，无法计价')
+    + kpi('缓存命中', tin? hit.toFixed(1)+'%' : '—', tin? fmt(tcached)+' 命中' : '宿主不上报缓存')
+    + kpi('轮次', turns, '用户输入次数')
+    + kpi('步数', steps, '模型请求次数');
+
+  /* 每日用量 */
+  const daily = {};
+  list.forEach(s=>{
+    s.requests.forEach(r=>{
+      if (!r.ts) return;
+      const k = dayKey(r.ts);
+      const d = daily[k] || (daily[k] = {in:0, byHost:{}});
+      d.in += r.in;
+      d.byHost[s.host] = (d.byHost[s.host]||0) + r.in;
+    });
+  });
+  let days = Object.entries(daily).sort((a,b)=>a[0]<b[0]?-1:1);
+  // 补齐空白天，保证横轴连续（否则跨月会骗人）
+  if (days.length){
+    const s0 = new Date(days[0][0]+'T00:00:00');
+    const e0 = new Date(days[days.length-1][0]+'T00:00:00');
+    const filled = [];
+    for (let d=new Date(s0); d<=e0; d.setDate(d.getDate()+1)){
+      const k = dayKey(d.getTime());
+      filled.push([k, daily[k] || {in:0, byHost:{}}]);
+    }
+    days = filled;
+  }
+  if (days.length > 130) days = days.slice(-130);
+  const W = Math.max(520, $('#dailyHost').clientWidth||760), H = 200;
+  const padL=44, padR=8, padT=10, padB=22;
+  const iw=W-padL-padR, ih=H-padT-padB;
+  const maxV = Math.max(1, ...days.map(([,v])=>v.in));
+  const bw = Math.max(3, Math.min(18, iw/Math.max(1,days.length)*0.7));
+  let g='';
+  for (let i=0;i<=3;i++){
+    const y = padT + ih*i/3;
+    g += `<line x1="${padL}" x2="${W-padR}" y1="${y}" y2="${y}" stroke="#F0EDE5"/>
+      <text x="${padL-6}" y="${y+3.5}" text-anchor="end" font-size="9.5" fill="#9AA1AB">${fmt(maxV-maxV*i/3)}</text>`;
+  }
+  let bars='';
+  days.forEach(([k,v],i)=>{
+    const x = padL + (iw/Math.max(1,days.length))*i + (iw/Math.max(1,days.length)-bw)/2;
+    let acc = 0;
+    Object.entries(v.byHost).forEach(([h,val])=>{
+      const hh = ih*(val/maxV);
+      bars += `<rect x="${x}" y="${padT+ih-(acc+hh)}" width="${bw}" height="${Math.max(.6,hh)}"
+        fill="${hostColor(h)}" opacity=".9"/>`;
+      acc += hh;
+    });
+  });
+  let ticks='';
+  const tn = Math.min(8, days.length);
+  for (let i=0;i<tn;i++){
+    const idx = Math.round(i*(days.length-1)/Math.max(1,tn-1));
+    const x = padL + (iw/Math.max(1,days.length))*idx + (iw/Math.max(1,days.length))/2;
+    ticks += `<text x="${x}" y="${H-5}" text-anchor="middle" font-size="9" fill="#9AA1AB">${days[idx][0].slice(5)}</text>`;
+  }
+  $('#dailyHost').innerHTML = `<svg viewBox="0 0 ${W} ${H}" height="${H}">${g}${bars}${ticks}</svg>
+    <div class="tip" id="dTip"></div>`;
+  const svg = $('#dailyHost').querySelector('svg'), tip = $('#dTip');
+  svg.onmousemove = ev=>{
+    const rect = svg.getBoundingClientRect();
+    const rel = (ev.clientX-rect.left)/rect.width*W;
+    let idx = Math.round((rel-padL-(iw/days.length)/2)/(iw/days.length));
+    idx = Math.max(0, Math.min(days.length-1, idx));
+    const [k,v] = days[idx];
+    tip.innerHTML = `<b>${k}</b> · ${fmt(v.in)} tokens<br>` +
+      Object.entries(v.byHost).map(([h,val])=>`<span style="opacity:.85">${hostName(h)} ${fmt(val)}</span>`).join('<br>');
+    tip.style.opacity=1;
+    const px=(padL+(iw/days.length)*idx)/W*rect.width;
+    tip.style.left=Math.min(rect.width-170, Math.max(0,px+10))+'px';
+    tip.style.top='4px';
+  };
+  svg.onmouseleave=()=>tip.style.opacity=0;
+  $('#dailyHint').textContent = days.length
+    ? `近 ${days.length} 天 · 按宿主堆叠${estN?' · 含估算会话':''}` : '无数据';
+
+  /* 宿主分布 */
+  const byHost = {}, estHost = {};
+  list.forEach(s=>{
+    byHost[s.host] = (byHost[s.host]||0) + s.totals.in + s.totals.out;
+    if (s.est) estHost[s.host] = true;
+  });
+  const hArr = Object.entries(byHost).sort((a,b)=>b[1]-a[1]);
+  const hMax = Math.max(1, ...hArr.map(([,v])=>v));
+  $('#hostDist').innerHTML = hArr.length ? hArr.map(([h,v])=>`
+    <div class="distrow"><span class="nm">${estHost[h]?'≈ ':''}${hostName(h)}</span>
+      <span class="bar"><i style="width:${v/hMax*100}%;background:${hostColor(h)};opacity:${estHost[h]?.45:1}"></i></span>
+      <span class="vv num">${estHost[h]?'≈':''}${fmt(v)}</span></div>`).join('')
+    : '<div class="empty">当前筛选无数据</div>';
+  const absent = (D.hosts||[]).filter(h=>h.status==='absent').map(h=>h.name);
+  const empty  = (D.hosts||[]).filter(h=>h.status==='empty').map(h=>h.name);
+  const probes = (D.probes||[]).filter(p=>p.exists);
+  $('#hostNote').innerHTML =
+      `<div>已探测 ${(D.hosts||[]).length} 个可解析宿主`
+      + (empty.length?` · ${empty.join('、')} 有日志但无可用会话`:'')
+      + (absent.length?` · ${absent.join('、')} 未安装`:'') + `</div>`
+    + (probes.length
+        ? `<div style="margin-top:9px;color:#6E7681;font-weight:600;font-size:10.5px">已发现但拿不到 token（只清点，不进统计）</div>`
+          + probes.map(p=>`<div class="probe"><span class="nm">${esc(p.name)}</span>
+              <span class="nt">${p.count} 项 · ${esc(p.note)}</span></div>`).join('')
+        : '');
+
+  /* 表格 */
+  const sortKey = state.f.sort;
+  const rows = list.slice().sort((a,b)=>{
+    if (sortKey==='in') return (b.totals.in+b.totals.out)-(a.totals.in+a.totals.out);
+    if (sortKey==='ctx') return b.totals.ctx-a.totals.ctx;
+    if (sortKey==='steps') return b.steps-a.steps;
+    return b.endTs-a.endTs;
+  });
+  const maxIn = Math.max(1, ...rows.map(s=>s.totals.in+s.totals.out));
+  const shown = rows.slice(0, 200);
+  $('#sessTable').innerHTML = `
+    <thead><tr>
+      <th>会话</th><th>宿主</th><th>工作区</th><th class="num">轮/步</th>
+      <th class="num">token</th><th class="num">上下文</th><th class="num">成本</th><th>最近活跃</th>
+    </tr></thead>
+    <tbody>${shown.map(s=>{
+      const ctxP = pct(s.totals.ctx, s.totals.window);
+      return `<tr class="row" data-id="${s.id}">
+        <td class="tt" title="${esc(s.title)}">${s.indexOnly?'<span class="estmark" style="color:#6E7681;background:#F1EFE8;margin:0 4px 0 0">仅索引</span>':''}${esc(trunc(s.title,46))}</td>
+        <td><span class="badge"><i class="dot" style="background:${hostColor(s.host)}"></i>${hostName(s.host)}</span></td>
+        <td style="color:#6E7681;font-size:11px">${esc(trunc((s.cwd||s.project||'').split(/[\\/]/).pop(),22))}</td>
+        <td class="num">${s.turns} / ${s.steps}</td>
+        <td class="num">${s.indexOnly?'<span class="faint">—</span>':((s.est?'≈':'')+fmt(s.totals.in+s.totals.out)+(s.est?'<span class="estmark">估</span>':''))}
+          ${s.indexOnly?'':`<span class="mini" style="margin-left:6px"><i style="width:${(s.totals.in+s.totals.out)/maxIn*100}%"></i></span>`}</td>
+        <td class="num">${fmt(s.totals.ctx)} <span class="faint">${ctxP.toFixed(0)}%</span></td>
+        <td class="num">${(s.indexOnly||s.est)?'<span class="faint">—</span>':'¥'+s.totals.cost.toFixed(2)}</td>
+        <td style="color:#6E7681;font-size:11px">${s.endTs? new Date(s.endTs).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—'}</td>
+      </tr>`;
+    }).join('')}</tbody>`;
+  $('#sessTable').querySelectorAll('tr.row').forEach(tr=>{
+    tr.onclick = ()=>{
+      state.sid = tr.dataset.id;
+      $('#sessPicker').value = state.sid;
+      setView('context');
+    };
+  });
+  $('#fCount').textContent = `${rows.length} / ${D.sessions.length} 个会话`
+    + (rows.length > shown.length ? ` · 表格仅列前 ${shown.length} 条` : '');
+
+  $('#insFoot').innerHTML = `扫描 <code>~/.workbuddy-ai/projects</code>、<code>~/.qwen/projects</code>、
+    <code>~/.claude/projects</code>、<code>~/.codex/sessions</code> · 只读 · 生成于 ${D.generatedAt}。
+    单会话请求点上限 ${600} 个，超长会话的按日统计可能略低。`;
+}
+
+/* ── 工具 ── */
+function esc(s){ return String(s??'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function trunc(s,n){ s=String(s||''); return s.length>n ? s.slice(0,n)+'…' : s; }
+
+/* ── 交互 ── */
+function buildFilters(){
+  // 宿主 chips（按实际会话数统计，含只有索引的）
+  const hosts = (D.hosts||[]).filter(h=>h.sessions>0);
+  const cnt = {};
+  D.sessions.forEach(s=>{ cnt[s.host] = (cnt[s.host]||0) + 1; });
+  $('#fHosts').innerHTML =
+    `<div class="hchip on" data-h="__all">全部 <span class="n">${D.sessions.length}</span></div>` +
+    hosts.map(h=>`<div class="hchip on" data-h="${h.id}">
+        <i class="dot" style="background:${h.color}"></i>${h.name}
+        <span class="n">${cnt[h.id]||0}</span></div>`).join('');
+  $('#fHosts').querySelectorAll('.hchip').forEach(c=>{
+    c.onclick = ()=>{
+      const id = c.dataset.h;
+      if (id==='__all'){
+        const allOn = hosts.every(h=>state.f.hosts.has(h.id));
+        state.f.hosts = allOn ? new Set() : new Set(hosts.map(h=>h.id));
+      } else {
+        state.f.hosts.has(id) ? state.f.hosts.delete(id) : state.f.hosts.add(id);
+        if (!state.f.hosts.size) state.f.hosts = new Set(hosts.map(h=>h.id));
+      }
+      syncChips(); renderInsights();
+    };
+  });
+  syncChips();
+
+  // 工作区
+  const ws = D.workspaces || [];
+  $('#fWs').innerHTML = `<option value="all">全部（${ws.length}）</option>` +
+    ws.map(w=>`<option value="${esc(w.path)}">${esc(w.name)}（${w.sessions}）</option>`).join('');
+  $('#fWs').onchange = e=>{ state.f.ws = e.target.value; renderInsights(); };
+
+  let t; 
+  $('#fSearch').oninput = e=>{ clearTimeout(t); t=setTimeout(()=>{ state.f.q=e.target.value.trim(); renderInsights(); },160); };
+  $('#fTime').onchange = e=>{ state.f.time = e.target.value; renderInsights(); };
+  $('#fSort').onchange = e=>{ state.f.sort = e.target.value; renderInsights(); };
+}
+function syncChips(){
+  const hosts = (D.hosts||[]).filter(h=>h.sessions>0);
+  const allOn = hosts.every(h=>state.f.hosts.has(h.id));
+  $('#fHosts').querySelectorAll('.hchip').forEach(c=>{
+    const id = c.dataset.h;
+    const on = id==='__all' ? allOn : state.f.hosts.has(id);
+    c.classList.toggle('on', on);
+    c.style.opacity = (id!=='__all' && !on) ? .5 : 1;
+  });
+}
+
+function buildPicker(){
+  const picker = $('#sessPicker');
+  picker.innerHTML = D.sessions.map(s=>
+    `<option value="${s.id}" ${s.id===state.sid?'selected':''}>[${hostName(s.host)}] ${esc(trunc(s.title,38))} · ${s.steps}步</option>`
+  ).join('');
+  picker.onchange = ()=>{ state.sid = picker.value; state.open.clear(); setView('context'); };
+}
+
+function boot(){
+  buildPicker();
+
+  document.querySelectorAll('.tab[data-view]').forEach(t=>{
+    t.onclick = ()=> setView(t.dataset.view);
+  });
+  buildFilters();
+
+  // 深链接：?trend=delta&brow=dna  /  #fleet #context #insights
+  const q = new URLSearchParams(location.search);
+  const syncBtn = (sel,m)=> document.querySelectorAll(sel+' button')
+    .forEach(b=>b.classList.toggle('on', b.dataset.m===m));
+  if (q.get('trend')==='delta'){ state.trendMode='delta'; syncBtn('#trendMode','delta'); }
+  if (q.get('brow')==='dna'){ state.browMode='dna'; syncBtn('#browMode','dna'); }
+  // 筛选深链接：?host=qwen&time=7&sort=in&q=关键词
+  if (q.get('host')){ state.f.hosts = new Set(q.get('host').split(',')); syncChips(); }
+  if (q.get('sid') && D.sessions.some(s=>s.id===q.get('sid'))) state.sid = q.get('sid');
+  ['time','sort','q','ws'].forEach(k=>{
+    const v = q.get(k);
+    if (v==null) return;
+    state.f[k] = v;
+    const sel = {time:'#fTime', sort:'#fSort', ws:'#fWs', q:'#fSearch'}[k];
+    if (sel) $(sel).value = v;
+  });
+  $('#browMode').onclick = e=>{
+    if (e.target.tagName!=='BUTTON') return;
+    [...e.currentTarget.children].forEach(b=>b.classList.toggle('on', b===e.target));
+    state.browMode = e.target.dataset.m;
+    renderBrowser(cur());
+  };
+  $('#trendMode').onclick = e=>{
+    if (e.target.tagName!=='BUTTON') return;
+    [...e.currentTarget.children].forEach(b=>b.classList.toggle('on', b===e.target));
+    state.trendMode = e.target.dataset.m;
+    renderTrend(cur());
+  };
+  let rt; window.onresize = ()=>{ clearTimeout(rt); rt=setTimeout(()=>{
+    if (state.view==='context') renderTrend(cur());
+    else if (state.view==='insights') renderInsights();
+  },160); };
+
+  buildPicker();
+  const h = (location.hash||'').replace('#','');
+  setView(['insights','context','fleet'].includes(h) ? h : 'insights');
+  initLive();
+}
+
+/* ══════════ 实时 ══════════ */
+function setLive(on, txt){
+  const b = $('#liveBadge');
+  if (!b) return;
+  b.className = 'live' + (on ? ' on' : '');
+  b.innerHTML = `<i></i>${txt || (on ? '实时' : '静态快照')}`;
+}
+
+function applyData(d, rev){
+  if (!d || !d.sessions) return;
+  D = d;
+  REV = rev || d.rev || REV;
+  buildHostMap();
+  const alive = new Set(D.sessions.map(s=>s.id));
+  if (!alive.has(state.sid)) state.sid = D.active || (D.sessions[0]||{}).id;
+  const hostIds = new Set((D.hosts||[]).filter(x=>x.sessions>0).map(x=>x.id));
+  const keep = [...state.f.hosts].filter(x=>hostIds.has(x));
+  state.f.hosts = new Set(keep.length ? keep : hostIds);
+  buildPicker();
+  buildFilters();
+  $('#fTime').value = state.f.time;
+  $('#fSort').value = state.f.sort;
+  $('#fSearch').value = state.f.q;
+  if ([...$('#fWs').options].some(o=>o.value===state.f.ws)) $('#fWs').value = state.f.ws;
+  draw();
+}
+
+let pollTimer = null, lastOk = 0;
+async function poll(){
+  if (!LIVE) return;
+  try{
+    const r = await fetch('/api/data?rev=' + encodeURIComponent(REV || ''), { cache:'no-store' });
+    if (!r.ok) throw new Error('http ' + r.status);
+    const j = await r.json();
+    if (!j.unchanged){
+      applyData(j, j.rev);
+      setLive(true, '实时 · ' + new Date().toLocaleTimeString('zh-CN', {hour12:false}));
+    } else {
+      setLive(true, '实时 · 已同步');
+    }
+    lastOk = Date.now();
+  }catch(e){
+    setLive(false, '连接断开 · 重试中');
+  }
+}
+
+async function initLive(){
+  if (location.protocol !== 'http:' && location.protocol !== 'https:'){ setLive(false); return; }
+  try{
+    const r = await fetch('/api/ping', { cache:'no-store' });
+    if (!r.ok) throw new Error();
+    LIVE = true;
+    setLive(true, '实时 · 连接中');
+    await poll();
+    pollTimer = setInterval(()=>{ if (!document.hidden) poll(); }, 3000);
+  }catch(e){
+    LIVE = false;
+    setLive(false, '静态快照');
+  }
+}
+const cur = ()=> D.sessions.find(s=>s.id===state.sid) || D.sessions[0];
+function draw(){
+  const s = cur();
+  if (s && $('#sessTitle')) $('#sessTitle').textContent = s.title;
+  if (state.view==='insights') renderInsights();
+  else render(s);
+}
+function setView(v){
+  state.view = v;
+  document.querySelectorAll('.tab[data-view]').forEach(x=>x.classList.toggle('on', x.dataset.view===v));
+  $('#view-insights').style.display = v==='insights'?'':'none';
+  $('#view-context').style.display = v==='context'?'':'none';
+  $('#view-fleet').style.display = v==='fleet'?'':'none';
+  draw();
+}
+
+if (!D.sessions.length){
+  document.querySelector('main').innerHTML = '<div class="empty">没有解析到会话数据，先运行 <code>python collect.py</code></div>';
+} else { boot(); }
+</script>
+</body>
+</html>

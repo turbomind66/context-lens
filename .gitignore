@@ -1,0 +1,12 @@
+# 运行时
+__pycache__/
+*.pyc
+_srv.log
+
+# 同步盘 / 系统
+*.baiduyun.uploading.cfg
+.DS_Store
+Thumbs.db
+
+# 本机真实数据（万一被拷进来）
+doubao_ctx_cache.json
