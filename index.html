@@ -250,7 +250,7 @@
 
     <div class="grid g-2">
       <div class="card">
-        <h3>每日用量 <span class="hint" id="dailyHint"></span></h3>
+        <h3><span id="dailyTitle">每日用量</span> <span class="hint" id="dailyHint"></span></h3>
         <div class="chart-host" id="dailyHost"><div class="tip" id="dTip"></div></div>
       </div>
       <div class="card">
@@ -895,30 +895,52 @@ function renderInsights(){
     + kpi('轮次', turns, '用户输入次数')
     + kpi('步数', steps, '模型请求次数');
 
-  /* 每日用量 */
+  /* 每日用量（时间选"今天"时切成按小时） */
+  const hourly = state.f.time === 'today';
+  const todayK = dayKey(Date.now());
+  // 图表也要守时间窗：长会话的请求可能横跨几个月，不裁剪会出现"选了 7 天却画 53 天"
+  const winStart = state.f.time === 'today' ? new Date().setHours(0,0,0,0)
+                 : state.f.time === '7'  ? new Date().setHours(0,0,0,0) - 6*864e5
+                 : state.f.time === '30' ? new Date().setHours(0,0,0,0) - 29*864e5 : 0;
   const daily = {};
   list.forEach(s=>{
     s.requests.forEach(r=>{
-      if (!r.ts) return;
-      const k = dayKey(r.ts);
+      if (!r.ts || r.ts < winStart) return;
+      let k;
+      if (hourly){
+        if (dayKey(r.ts) !== todayK) return;       // 跨天会话只取今天的部分
+        k = todayK + ' ' + pad2(new Date(r.ts).getHours());
+      } else {
+        k = dayKey(r.ts);
+      }
       const d = daily[k] || (daily[k] = {in:0, byHost:{}});
       d.in += r.in;
       d.byHost[s.host] = (d.byHost[s.host]||0) + r.in;
     });
   });
-  let days = Object.entries(daily).sort((a,b)=>a[0]<b[0]?-1:1);
-  // 补齐空白天，保证横轴连续（否则跨月会骗人）
-  if (days.length){
-    const s0 = new Date(days[0][0]+'T00:00:00');
-    const e0 = new Date(days[days.length-1][0]+'T00:00:00');
-    const filled = [];
-    for (let d=new Date(s0); d<=e0; d.setDate(d.getDate()+1)){
-      const k = dayKey(d.getTime());
-      filled.push([k, daily[k] || {in:0, byHost:{}}]);
+  let days;
+  if (hourly){
+    days = [];
+    for (let h=0; h<24; h++){
+      const k = todayK + ' ' + pad2(h);
+      days.push([k, daily[k] || {in:0, byHost:{}}]);
     }
-    days = filled;
+  } else {
+    days = Object.entries(daily).sort((a,b)=>a[0]<b[0]?-1:1);
+    // 补齐空白天，保证横轴连续（否则跨月会骗人）
+    if (days.length){
+      const s0 = new Date(days[0][0]+'T00:00:00');
+      const e0 = new Date(days[days.length-1][0]+'T00:00:00');
+      const filled = [];
+      for (let d=new Date(s0); d<=e0; d.setDate(d.getDate()+1)){
+        const k = dayKey(d.getTime());
+        filled.push([k, daily[k] || {in:0, byHost:{}}]);
+      }
+      days = filled;
+    }
+    if (days.length > 130) days = days.slice(-130);
   }
-  if (days.length > 130) days = days.slice(-130);
+  const labelOf = k => hourly ? k.slice(11) + '时' : k.slice(5);
   const W = Math.max(520, $('#dailyHost').clientWidth||760), H = 200;
   const padL=44, padR=8, padT=10, padB=22;
   const iw=W-padL-padR, ih=H-padT-padB;
@@ -942,11 +964,11 @@ function renderInsights(){
     });
   });
   let ticks='';
-  const tn = Math.min(8, days.length);
+  const tn = Math.min(hourly ? 12 : 8, days.length);
   for (let i=0;i<tn;i++){
     const idx = Math.round(i*(days.length-1)/Math.max(1,tn-1));
     const x = padL + (iw/Math.max(1,days.length))*idx + (iw/Math.max(1,days.length))/2;
-    ticks += `<text x="${x}" y="${H-5}" text-anchor="middle" font-size="9" fill="#9AA1AB">${days[idx][0].slice(5)}</text>`;
+    ticks += `<text x="${x}" y="${H-5}" text-anchor="middle" font-size="9" fill="#9AA1AB">${labelOf(days[idx][0])}</text>`;
   }
   $('#dailyHost').innerHTML = `<svg viewBox="0 0 ${W} ${H}" height="${H}">${g}${bars}${ticks}</svg>
     <div class="tip" id="dTip"></div>`;
@@ -957,7 +979,7 @@ function renderInsights(){
     let idx = Math.round((rel-padL-(iw/days.length)/2)/(iw/days.length));
     idx = Math.max(0, Math.min(days.length-1, idx));
     const [k,v] = days[idx];
-    tip.innerHTML = `<b>${k}</b> · ${fmt(v.in)} tokens<br>` +
+    tip.innerHTML = `<b>${hourly ? '今日 ' + k.slice(11) + ':00' : k}</b> · ${fmt(v.in)} tokens<br>` +
       Object.entries(v.byHost).map(([h,val])=>`<span style="opacity:.85">${hostName(h)} ${fmt(val)}</span>`).join('<br>');
     tip.style.opacity=1;
     const px=(padL+(iw/days.length)*idx)/W*rect.width;
@@ -965,8 +987,10 @@ function renderInsights(){
     tip.style.top='4px';
   };
   svg.onmouseleave=()=>tip.style.opacity=0;
-  $('#dailyHint').textContent = days.length
-    ? `近 ${days.length} 天 · 按宿主堆叠${estN?' · 含估算会话':''}` : '无数据';
+  $('#dailyTitle').textContent = hourly ? '今日分时用量' : '每日用量';
+  $('#dailyHint').textContent = hourly
+    ? `今日 24 小时 · 按宿主堆叠${estN?' · 含估算会话':''}`
+    : (days.length ? `近 ${days.length} 天 · 按宿主堆叠${estN?' · 含估算会话':''}` : '无数据');
 
   /* 宿主分布 */
   const byHost = {}, estHost = {};
