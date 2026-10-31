@@ -168,6 +168,11 @@
   .inp{background:#fff;border:1px solid var(--line);border-radius:8px;padding:5px 9px;
        font:inherit;font-size:12px;min-width:170px;color:var(--ink)}
   .inp:focus{outline:none;border-color:#C7C3F5}
+  .inp.dte{min-width:0;width:128px;padding:4px 6px;font-size:11.5px}
+  #fRange{display:none;align-items:center;gap:4px}
+  #fRange.on{display:inline-flex}
+  .clear{cursor:pointer;color:#9AA1AB;font-size:15px;line-height:1;padding:2px 5px;border-radius:5px}
+  .clear:hover{background:#F1EFE8;color:#6E7681}
   table.sess{width:100%;border-collapse:collapse;font-size:12px}
   table.sess th{position:sticky;top:0;background:#fff;z-index:1;text-align:left;font-weight:600;
        color:var(--faint);font-size:10.5px;padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -228,12 +233,19 @@
         <span class="flabel">工作区</span>
         <select id="fWs" style="max-width:200px"></select>
         <span class="flabel">时间</span>
-        <select id="fTime" style="max-width:120px">
+        <select id="fTime" style="max-width:110px">
           <option value="all">全部</option>
           <option value="today">今天</option>
           <option value="7">近 7 天</option>
           <option value="30">近 30 天</option>
+          <option value="custom">自定义…</option>
         </select>
+        <span id="fRange">
+          <input class="inp dte" type="date" id="fFrom">
+          <span class="faint" style="font-size:11px">至</span>
+          <input class="inp dte" type="date" id="fTo">
+          <span class="clear" id="fRangeClear" title="清空日期">×</span>
+        </span>
         <input class="inp" id="fSearch" placeholder="搜索标题 / 路径…">
         <span class="fsep"></span>
         <span class="flabel">排序</span>
@@ -381,7 +393,7 @@ let LIVE = false;
 let state = {
   sid: D.active, view:'insights', browMode:'group', trendMode:'total', open:new Set(),
   f: { hosts: new Set((D.hosts||[]).filter(h=>h.sessions>0).map(h=>h.id)),
-       ws:'all', time:'all', q:'', sort:'recent' }
+       ws:'all', time:'all', q:'', sort:'recent', from:'', to:'' }
 };
 const $ = s => document.querySelector(s);
 const el = (t,c,h) => { const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.innerHTML=h; return e; };
@@ -864,6 +876,12 @@ function filteredSessions(){
     if (f.time==='today' && (!s.endTs || s.endTs < t0.getTime())) return false;
     if (f.time==='7'  && (!s.endTs || now - s.endTs > 7*864e5)) return false;
     if (f.time==='30' && (!s.endTs || now - s.endTs > 30*864e5)) return false;
+    if (f.time==='custom'){
+      if (!s.endTs) return false;
+      const a = f.from ? new Date(f.from+'T00:00:00').getTime() : -Infinity;
+      const b = f.to   ? new Date(f.to+'T23:59:59.999').getTime() : Infinity;
+      if (s.endTs < a || s.endTs > b) return false;
+    }
     return true;
   });
 }
@@ -895,21 +913,29 @@ function renderInsights(){
     + kpi('轮次', turns, '用户输入次数')
     + kpi('步数', steps, '模型请求次数');
 
-  /* 每日用量（时间选"今天"时切成按小时） */
-  const hourly = state.f.time === 'today';
-  const todayK = dayKey(Date.now());
+  /* 用量图：今天 / 自定义单日 → 按小时；其余按天 */
+  const isCustom = state.f.time === 'custom';
+  const cFrom = isCustom && state.f.from ? new Date(state.f.from+'T00:00:00').getTime() : 0;
+  const cTo   = isCustom && state.f.to   ? new Date(state.f.to+'T23:59:59.999').getTime() : 0;
+  const singleDay = state.f.time === 'today'
+    || (isCustom && cFrom && cTo && dayKey(cFrom) === dayKey(cTo));
+  const hourly = singleDay;
+  const hourK = dayKey(state.f.time === 'today' ? Date.now() : (cFrom || Date.now()));
+  const hourPrefix = state.f.time === 'today' ? '今日' : hourK.slice(5);
   // 图表也要守时间窗：长会话的请求可能横跨几个月，不裁剪会出现"选了 7 天却画 53 天"
-  const winStart = state.f.time === 'today' ? new Date().setHours(0,0,0,0)
+  const winStart = isCustom ? (cFrom || 0)
+                 : state.f.time === 'today' ? new Date().setHours(0,0,0,0)
                  : state.f.time === '7'  ? new Date().setHours(0,0,0,0) - 6*864e5
                  : state.f.time === '30' ? new Date().setHours(0,0,0,0) - 29*864e5 : 0;
+  const winEnd = isCustom ? (cTo || Infinity) : Infinity;
   const daily = {};
   list.forEach(s=>{
     s.requests.forEach(r=>{
-      if (!r.ts || r.ts < winStart) return;
+      if (!r.ts || r.ts < winStart || r.ts > winEnd) return;
       let k;
       if (hourly){
-        if (dayKey(r.ts) !== todayK) return;       // 跨天会话只取今天的部分
-        k = todayK + ' ' + pad2(new Date(r.ts).getHours());
+        if (dayKey(r.ts) !== hourK) return;        // 单日视图只取那一天
+        k = hourK + ' ' + pad2(new Date(r.ts).getHours());
       } else {
         k = dayKey(r.ts);
       }
@@ -922,9 +948,19 @@ function renderInsights(){
   if (hourly){
     days = [];
     for (let h=0; h<24; h++){
-      const k = todayK + ' ' + pad2(h);
+      const k = hourK + ' ' + pad2(h);
       days.push([k, daily[k] || {in:0, byHost:{}}]);
     }
+  } else if (isCustom && cFrom){
+    // 自定义区间：按选区铺满横轴
+    days = [];
+    const s0 = new Date(cFrom); s0.setHours(0,0,0,0);
+    const e0 = new Date(cTo || Date.now()); e0.setHours(0,0,0,0);
+    for (let d=new Date(s0); d<=e0; d.setDate(d.getDate()+1)){
+      const k = dayKey(d.getTime());
+      days.push([k, daily[k] || {in:0, byHost:{}}]);
+    }
+    if (days.length > 400) days = days.slice(0, 400);
   } else {
     days = Object.entries(daily).sort((a,b)=>a[0]<b[0]?-1:1);
     // 补齐空白天，保证横轴连续（否则跨月会骗人）
@@ -979,7 +1015,7 @@ function renderInsights(){
     let idx = Math.round((rel-padL-(iw/days.length)/2)/(iw/days.length));
     idx = Math.max(0, Math.min(days.length-1, idx));
     const [k,v] = days[idx];
-    tip.innerHTML = `<b>${hourly ? '今日 ' + k.slice(11) + ':00' : k}</b> · ${fmt(v.in)} tokens<br>` +
+    tip.innerHTML = `<b>${hourly ? hourPrefix + ' ' + k.slice(11) + ':00' : k}</b> · ${fmt(v.in)} tokens<br>` +
       Object.entries(v.byHost).map(([h,val])=>`<span style="opacity:.85">${hostName(h)} ${fmt(val)}</span>`).join('<br>');
     tip.style.opacity=1;
     const px=(padL+(iw/days.length)*idx)/W*rect.width;
@@ -987,10 +1023,14 @@ function renderInsights(){
     tip.style.top='4px';
   };
   svg.onmouseleave=()=>tip.style.opacity=0;
-  $('#dailyTitle').textContent = hourly ? '今日分时用量' : '每日用量';
+  $('#dailyTitle').textContent = hourly
+    ? (state.f.time === 'today' ? '今日分时用量' : '分时用量')
+    : '每日用量';
   $('#dailyHint').textContent = hourly
-    ? `今日 24 小时 · 按宿主堆叠${estN?' · 含估算会话':''}`
-    : (days.length ? `近 ${days.length} 天 · 按宿主堆叠${estN?' · 含估算会话':''}` : '无数据');
+    ? `${hourPrefix} · 24 小时 · 按宿主堆叠${estN?' · 含估算会话':''}`
+    : (days.length
+        ? `${isCustom ? '自定义 ' : '近 '}${days.length} 天 · 按宿主堆叠${estN?' · 含估算会话':''}`
+        : '无数据');
 
   /* 宿主分布 */
   const byHost = {}, estHost = {};
@@ -1100,7 +1140,29 @@ function buildFilters(){
 
   let t; 
   $('#fSearch').oninput = e=>{ clearTimeout(t); t=setTimeout(()=>{ state.f.q=e.target.value.trim(); renderInsights(); },160); };
-  $('#fTime').onchange = e=>{ state.f.time = e.target.value; renderInsights(); };
+  $('#fTime').onchange = e=>{
+    state.f.time = e.target.value;
+    if (state.f.time === 'custom' && !state.f.from && !state.f.to){
+      state.f.from = dayKey(Date.now() - 6*864e5);
+      state.f.to   = dayKey(Date.now());
+    }
+    syncRangeUI();
+    renderInsights();
+  };
+  const onRange = ()=>{
+    let a = $('#fFrom').value, b = $('#fTo').value;
+    if (a && b && a > b){ const t=a; a=b; b=t; $('#fFrom').value=a; $('#fTo').value=b; }
+    state.f.from = a; state.f.to = b;
+    renderInsights();
+  };
+  $('#fFrom').onchange = onRange;
+  $('#fTo').onchange = onRange;
+  $('#fRangeClear').onclick = ()=>{
+    $('#fFrom').value = ''; $('#fTo').value = '';
+    state.f.from = ''; state.f.to = '';
+    renderInsights();
+  };
+  syncRangeUI();
   $('#fSort').onchange = e=>{ state.f.sort = e.target.value; renderInsights(); };
 }
 function syncChips(){
@@ -1112,6 +1174,19 @@ function syncChips(){
     c.classList.toggle('on', on);
     c.style.opacity = (id!=='__all' && !on) ? .5 : 1;
   });
+}
+
+function syncRangeUI(){
+  const on = state.f.time === 'custom';
+  const box = $('#fRange');
+  if (box) box.classList.toggle('on', on);
+  if (!on) return;
+  if (!state.f.from && !state.f.to){
+    state.f.from = dayKey(Date.now() - 6*864e5);
+    state.f.to   = dayKey(Date.now());
+  }
+  if ($('#fFrom')) $('#fFrom').value = state.f.from || '';
+  if ($('#fTo'))   $('#fTo').value   = state.f.to || '';
 }
 
 function buildPicker(){
@@ -1146,6 +1221,9 @@ function boot(){
     const sel = {time:'#fTime', sort:'#fSort', ws:'#fWs', q:'#fSearch'}[k];
     if (sel) $(sel).value = v;
   });
+  if (q.get('from')) state.f.from = q.get('from');
+  if (q.get('to'))   state.f.to   = q.get('to');
+  syncRangeUI();
   $('#browMode').onclick = e=>{
     if (e.target.tagName!=='BUTTON') return;
     [...e.currentTarget.children].forEach(b=>b.classList.toggle('on', b===e.target));
@@ -1190,6 +1268,7 @@ function applyData(d, rev){
   buildPicker();
   buildFilters();
   $('#fTime').value = state.f.time;
+  syncRangeUI();
   $('#fSort').value = state.f.sort;
   $('#fSearch').value = state.f.q;
   if ([...$('#fWs').options].some(o=>o.value===state.f.ws)) $('#fWs').value = state.f.ws;
