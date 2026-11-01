@@ -98,6 +98,7 @@ collect.py       采集 + 解析（宿主适配器 + 归一化 Builder）
 leveldb.py       纯 Python LevelDB 读取器
 serve.py         实时服务（增量解析 + gzip + 3 秒轮询）
 index.html       单页看板（原生 JS + SVG，无框架无依赖）
+tools/audit.py   自检工具：token 复核 / 每日桶覆盖率 / 新宿主探测 / leveldb 试读
 make_public.py   生成脱敏的公开数据
 ```
 
