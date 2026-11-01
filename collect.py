@@ -58,11 +58,35 @@ def text_of(v):
     return "\n".join(out)
 
 
+def jargs(a, a_txt):
+    """工具参数还原成 dict：日志里可能是对象，也可能是 JSON 字符串。"""
+    if isinstance(a, dict):
+        return a
+    try:
+        v = json.loads(a_txt) if isinstance(a_txt, str) and a_txt.strip() else {}
+        return v if isinstance(v, dict) else {}
+    except Exception:
+        return {}
+
+
 def ts_of(d):
     try:
         return int(d.get("timestamp") or 0)
     except Exception:
         return 0
+
+
+def day_of(ts):
+    if not ts:
+        return None
+    return datetime.datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+
+
+def hour_key(ts):
+    """请求归属的小时桶 key：'YYYY-MM-DD HH'（每日/分时用量共用一套全量时间桶）。"""
+    if not ts:
+        return None
+    return datetime.datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H")
 
 
 def iso_ms(s):
@@ -119,6 +143,13 @@ class Builder:
         self._cid = 0
         self.est = False            # 该会话是否有 token 是估算出来的
         self.est_mode = False       # 适配器显式开启：本宿主不上报 usage
+        self.daily = {}             # 小时桶 'YYYY-MM-DD HH' -> {i,o,c}，逐请求累积，
+                                    # 不受 requests 的 600 点截断影响（每日/分时用量用）
+        self.agents = []            # Agent 工具调用 = 子代理委派（编队页真谱系）
+        self._agent_by_cid = {}     # callId -> agents 下标
+        self.tasks = collections.OrderedDict()   # tid -> 任务 dict
+        self._task_n = 0
+        self._task_create_args = {} # TaskCreate 的 callId -> (args, ts)，等结果里回读 tid
 
     def _touch(self, ts):
         if not self.first_ts:
@@ -188,6 +219,12 @@ class Builder:
         self.tin += i_tok
         self.tout += o_tok
         self.tcached += c_tok
+        hk = hour_key(ts)
+        if hk:
+            dd = self.daily.setdefault(hk, {"i": 0, "o": 0, "c": 0})
+            dd["i"] += i_tok
+            dd["o"] += o_tok
+            dd["c"] += c_tok
         self.requests.append({
             "i": self.step, "ts": ts, "in": i_tok, "out": o_tok, "cached": c_tok,
             "ms": model_ms, "toolMs": 0,
@@ -230,7 +267,69 @@ class Builder:
         self.browser.append({"cat": "targs", "label": f"工具参数 · {name}", "tok": na,
                              "step": self.step, "preview": a_txt[:170]})
 
+    # ── 子代理与任务（编队页真谱系） ──────────────────────
+    def agent(self, ts, desc, prompt, call_id):
+        """Agent 工具调用 = 一次子代理委派。"""
+        self._touch(ts)
+        rec = {"step": self.step, "ts": ts,
+               "desc": (str(desc or "").strip() or "子代理")[:80],
+               "prompt": str(prompt or "")[:220],
+               "report": None, "reportTok": 0, "durMs": None}
+        self.agents.append(rec)
+        if call_id is not None:
+            self._agent_by_cid[call_id] = len(self.agents) - 1
+
+    def agent_done(self, call_id, ts, out_text):
+        """Agent 调用的返回 = 子代理的最终报告。"""
+        idx = self._agent_by_cid.get(call_id)
+        if idx is None:
+            return
+        rec = self.agents[idx]
+        if ts and rec["ts"]:
+            rec["durMs"] = max(0, ts - rec["ts"])
+        rec["report"] = str(out_text or "")[:220]
+        rec["reportTok"] = est(out_text or "")
+
+    def _add_task(self, args, result_text, ts):
+        self._task_n += 1
+        tid = None
+        if result_text:
+            m = re.search(r"Task #([\w-]+)", str(result_text))
+            tid = m.group(1) if m else None
+        tid = str(args.get("taskId") or tid or self._task_n)
+        self.tasks[tid] = {"tid": tid,
+                           "subject": str(args.get("subject") or args.get("description") or "")[:80],
+                           "desc": str(args.get("description") or "")[:220],
+                           "status": "pending", "createTs": ts, "updateTs": None}
+
+    def task_create(self, ts, args, call_id):
+        """TaskCreate：tid 在返回文本（'Task #N created'）里，先挂起等结果。"""
+        self._touch(ts)
+        if call_id is not None:
+            self._task_create_args[call_id] = (args or {}, ts)
+        else:
+            self._add_task(args or {}, None, ts)
+
+    def task_create_done(self, call_id, ts, result_text):
+        got = self._task_create_args.pop(call_id, None)
+        if got:
+            self._add_task(got[0], result_text, ts)
+
+    def task_update(self, ts, args):
+        """TaskUpdate：按 taskId 改状态（completed / in_progress / pending…）。"""
+        self._touch(ts)
+        t = self.tasks.get(str(args.get("taskId") or ""))
+        if not t:
+            return
+        st = str(args.get("status") or "").strip().lower()
+        if st:
+            t["status"] = st
+        t["updateTs"] = ts
+
     def finish(self, meta):
+        # TaskCreate 没等到结果（会话被截断）也补一条，tid 用序号兜底
+        for _cid, (args, ts) in self._task_create_args.items():
+            self._add_task(args, None, ts)
         if not self.requests:
             return None
         reqs = list(self.requests)
@@ -258,6 +357,9 @@ class Builder:
             "turns": self.turns,
             "steps": self.step,
             "requests": reqs,
+            "daily": self.daily,
+            "agents": self.agents[:20],
+            "tasks": list(self.tasks.values())[:50],
             "tools": dict(self.tools.most_common(12)),
             "toolCount": sum(self.tools.values()),
             "files": self.files,
@@ -273,6 +375,8 @@ class Builder:
                 "tool": round(self.t_tool, 1),
                 "idle": round(idle, 1),
             },
+            # 全部事件共享同一时间戳（如豆包工作用文件 mtime）时耗时拆解无意义
+            "timingKnown": (self.last_ts or 0) != (self.first_ts or 0),
         }
 
 
@@ -330,6 +434,13 @@ def parse_workbuddy(path, host="workbuddy"):
                 "in": u.get("input_tokens"), "out": u.get("output_tokens"),
                 "cached": u.get("cache_read_input_tokens"),
             }, d.get("callId"))
+            if name == "Agent":                      # 子代理委派 → 编队真谱系
+                j = jargs(a, a_txt)
+                b.agent(ts, j.get("description"), j.get("prompt") or a_txt, d.get("callId"))
+            elif name == "TaskCreate":
+                b.task_create(ts, jargs(a, a_txt), d.get("callId"))
+            elif name == "TaskUpdate":
+                b.task_update(ts, jargs(a, a_txt))
             if name in ("Bash", "PowerShell"):
                 try:
                     j = json.loads(a_txt)
@@ -339,7 +450,12 @@ def parse_workbuddy(path, host="workbuddy"):
         elif typ == "function_call_result":
             out = d.get("output")
             o_txt = text_of(out) if isinstance(out, (list, str)) else text_of([out])
-            b.result(ts, d.get("name"), o_txt, d.get("callId"))
+            cid = d.get("callId")
+            b.result(ts, d.get("name"), o_txt, cid)
+            if cid in b._agent_by_cid:               # Agent 返回 = 子代理最终报告
+                b.agent_done(cid, ts, o_txt)
+            if d.get("name") == "TaskCreate":
+                b.task_create_done(cid, ts, o_txt)
     if not any_ev:
         return None
     return b.finish({"id": os.path.basename(path).rsplit(".jsonl", 1)[0], "host": host,
@@ -380,7 +496,9 @@ def parse_qwen(path):
             calls = [p["functionCall"] for p in parts
                      if isinstance(p, dict) and p.get("functionCall")]
             name0 = (calls[0].get("name") if calls else "model") or "model"
-            args0 = json.dumps(calls[0].get("args") or {}, ensure_ascii=False) if calls else text_of(parts)
+            # 纯文本回复不再把正文塞进"工具参数"（助手文本由 b.assistant 记一次，
+            # 否则归一化前 targs 与 assistant 双计，构成比例失真）
+            args0 = json.dumps(calls[0].get("args") or {}, ensure_ascii=False) if calls else ""
             b.call(ts, name0, args0, {
                 "in": u.get("promptTokenCount"), "out": u.get("candidatesTokenCount"),
                 "cached": u.get("cachedContentTokenCount"),
@@ -451,7 +569,8 @@ def parse_claude(path):
                     b.extra_call(ts, c.get("name") or "?",
                                  json.dumps(c.get("input") or {}, ensure_ascii=False))
             else:
-                b.call(ts, "model", "\n".join(texts), usage)
+                # 纯文本回复：正文交给 b.assistant，参数位留空（避免 targs 双计）
+                b.call(ts, "model", "", usage)
             if thinks:
                 b.think(ts, "\n".join(thinks))
             if texts:
@@ -674,7 +793,7 @@ def make_index_session(sid, m, host="workbuddyai"):
         "project": os.path.basename((m.get("cwd") or "").rstrip("\\/")) or "workbuddy",
         "startTs": m.get("createdAt") or 0, "endTs": m.get("lastAt") or 0,
         "wallSec": 0, "turns": 0, "steps": 0,
-        "requests": [], "tools": {}, "toolCount": 0,
+        "requests": [], "daily": {}, "agents": [], "tasks": [], "tools": {}, "toolCount": 0,
         "files": {"read": 0, "write": 0, "search": 0}, "commands": [], "browser": [],
         "totals": {"in": 0, "out": 0, "cached": 0,
                    "ctx": int(m.get("used") or 0),
@@ -875,47 +994,47 @@ HOSTS = [
      "parse": parse_codex, "home": "~/.codex/sessions", "recursive": True},
 ]
 
-# 已发现但拿不到 token 的 Agent（只做清点，不进统计）
+# 已发现但拿不到 token 的 Agent（状态制清点，不进统计）。
+# state 是人工核实的结论（2026-11 全机深查），paths 可列多个候选位置。
 PROBES = [
-    {"name": "豆包 Doubao", "path": os.path.join(HOME, "AppData", "Roaming", "Doubao"),
-     "count": "files", "note": "只有 public_config.json，对话全在云端，本地无记录"},
-    {"name": "百度搭子 DuMate", "path": os.path.join(HOME, "AppData", "Local", "Programs", "DuMate"),
-     "count": "files", "note": "已安装，未发现本地会话库"},
-    {"name": "Qoder", "path": os.path.join(HOME, ".qoder-cn"),
-     "count": "files", "note": "仅入口脚本"},
-    {"name": "Cherry Studio", "path": os.path.join(HOME, ".cherrystudio"),
-     "count": "files", "note": "仅配置，会话库未找到"},
-    {"name": "ima copilot", "path": os.path.join(HOME, "AppData", "Local", "ima.copilot"),
-     "count": "files", "note": "IM 消息库，非 agent 会话"},
-    {"name": "Claude Desktop", "path": os.path.join(HOME, "AppData", "Local", "Claude"),
-     "count": "files", "note": "桌面端，会话不在本地明文"},
+    {"name": "豆包 Doubao",
+     "paths": [os.path.join(HOME, "AppData", "Local", "Doubao"),
+               os.path.join(HOME, "AppData", "Roaming", "Doubao")],
+     "state": "仅安装器残留",
+     "note": "User Data 只有 Installer/sdk_storage，对话在云端，本地无会话记录"},
+    {"name": "百度搭子 DuMate",
+     "paths": [os.path.join(HOME, "AppData", "Local", "Programs", "DuMate")],
+     "state": "未发现本地会话库",
+     "note": "已安装，未发现本地会话数据"},
+    {"name": "Qoder",
+     "paths": [os.path.join(HOME, ".qoder-cn")],
+     "state": "仅启动脚本",
+     "note": "entry 下只有 cmd/ps1 启动脚本，全机无会话数据目录"},
+    {"name": "Cherry Studio",
+     "paths": [os.path.join(HOME, ".cherrystudio"),
+               os.path.join(HOME, "AppData", "Roaming", "CherryStudio")],
+     "state": "未登录/未使用",
+     "note": "运行时依赖目录 + 空 Data；启用后可用自带 leveldb.py 读 Local Storage/IndexedDB 纳入"},
+    {"name": "ima copilot",
+     "paths": [os.path.join(HOME, "AppData", "Local", "ima.copilot")],
+     "state": "本地仅缓存",
+     "note": "只有知识库首页缓存/阅读进度/下载配置，会话正文在云端"},
+    {"name": "Claude Desktop",
+     "paths": [os.path.join(HOME, "AppData", "Local", "Claude")],
+     "state": "无本地会话数据",
+     "note": "只有日志文件，会话不在本地明文"},
 ]
 
 
 def probe_all():
     out = []
     for p in PROBES:
-        path = p["path"]
-        exists = os.path.exists(path)
-        n = 0
-        if exists:
-            try:
-                if p["count"] == "dirs":
-                    n = sum(1 for x in os.scandir(path) if x.is_dir())
-                else:
-                    n = sum(1 for _ in os.scandir(path))
-            except Exception:
-                n = 0
-        out.append({"name": p["name"], "path": path.replace(HOME, "~").replace("\\", "/"),
-                    "exists": exists, "count": n, "note": p["note"]})
+        exists = any(os.path.exists(x) for x in p["paths"])
+        out.append({"name": p["name"], "state": p["state"], "note": p["note"],
+                    "exists": exists,
+                    "paths": [x.replace(HOME, "~").replace("\\", "/") for x in p["paths"]]})
     return out
 
-
-
-def day_of(ts):
-    if not ts:
-        return None
-    return datetime.datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
 
 
 def scan(cache=None, verbose=False):
@@ -1030,7 +1149,9 @@ def trim_for_output(sessions, full_n=40, keep_points=28):
 
 def build_data(sessions, host_info):
     sessions = sorted(sessions, key=lambda s: s["endTs"], reverse=True)
-    sessions = trim_for_output(sessions)
+
+    # 每日聚合：先用全量逐请求累积的小时桶（不受 600 点截断 / 输出降采样影响），
+    # 再对 sessions 瘦身。桶按活跃日计会话数（不再是"结束日"口径）。
     daily = {}
 
     def slot(day):
@@ -1038,19 +1159,16 @@ def build_data(sessions, host_info):
                                       "ids": set(), "hosts": {}})
 
     for s in sessions:
-        for r in s["requests"]:
-            d0 = day_of(r["ts"])
-            if not d0:
-                continue
-            d = slot(d0)
-            d["in"] += r["in"]
-            d["out"] += r["out"]
-            d["cached"] += r["cached"]
-            d["cost"] += cost_of(r["cached"], r["in"], r["out"])
-            d["hosts"][s["host"]] = d["hosts"].get(s["host"], 0) + r["in"]
-        d0 = day_of(s["endTs"])
-        if d0:
-            slot(d0)["ids"].add(s["id"])
+        for hk, v in (s.get("daily") or {}).items():
+            d = slot(hk[:10])
+            d["in"] += v["i"]
+            d["out"] += v["o"]
+            d["cached"] += v["c"]
+            d["cost"] += cost_of(v["c"], v["i"], v["o"])
+            d["hosts"][s["host"]] = d["hosts"].get(s["host"], 0) + v["i"]
+            d["ids"].add(s["id"])
+
+    sessions = trim_for_output(sessions)
 
     workspaces = {}
     for s in sessions:

@@ -347,6 +347,7 @@
           <span class="seg-btns" id="trendMode">
             <button class="on" data-m="total">总量</button><button data-m="delta">增量</button>
           </span>
+          <span class="tiny faint" style="margin-left:6px">最近 90 个请求点 · 日志保留 600 点</span>
         </span>
       </h3>
       <div class="chart-host" id="trendHost"><div class="tip" id="tip"></div></div>
@@ -357,6 +358,8 @@
 
   <!-- ═══════════ 编队 ═══════════ -->
   <section id="view-fleet" style="display:none">
+    <div class="card" id="fleetStrip" style="margin-bottom:12px;display:none;
+         gap:10px;align-items:center;flex-wrap:wrap"></div>
     <div class="grid g-fleet">
       <div class="card">
         <h3>Agent 网络 <span class="hint" id="netHint"></span></h3>
@@ -370,6 +373,10 @@
     <div class="card" style="margin-top:12px">
       <h3>工具调用排行 <span class="hint">当前会话 · 步数口径</span></h3>
       <div id="toolRank"></div>
+    </div>
+    <div class="card" id="taskCard" style="margin-top:12px;display:none">
+      <h3>任务 <span class="hint">来自 TaskCreate / TaskUpdate 事件</span></h3>
+      <div id="taskPanel" style="max-height:420px;overflow:auto"></div>
     </div>
     <div class="foot" id="fleetNote"></div>
   </section>
@@ -494,6 +501,7 @@ function renderIndexOnly(s){
 function render(s){
   if (!s.requests || !s.requests.length) return renderIndexOnly(s);
   const t = s.totals, tm = s.timing, last = s.requests[s.requests.length-1];
+  const noTiming = s.timingKnown === false;   // 宿主日志无逐事件时间戳（如豆包工作）
   const hit = pct(t.cached, t.in);
 
   $('#sessTitle').textContent = s.title;
@@ -502,7 +510,7 @@ function render(s){
     <div class="big num">${fmt(t.in)} <span class="muted" style="font-size:12px;font-weight:400">in</span>
       <span style="color:#D8D4C8">/</span> ${fmt(t.out)} <span class="muted" style="font-size:12px;font-weight:400">out</span></div>
     <div class="kv"><span class="k">文件 读 / 写 / 搜</span><span class="v num">${s.files.read} / ${s.files.write} / ${s.files.search}</span></div>
-    <div class="kv"><span class="k">会话跨度</span><span class="v num">${fmtSec(s.wallSec)}</span></div>`;
+    <div class="kv"><span class="k">会话跨度</span><span class="v num">${noTiming?'—':fmtSec(s.wallSec)}</span></div>`;
 
   $('#kpiSess').innerHTML = `
     <h3 style="margin:0 0 2px">当前会话</h3>
@@ -523,7 +531,7 @@ function render(s){
     <div class="kv"><span class="k">当前会话</span><span class="v num">${fmt(t.in+t.out)} · ¥${t.cost.toFixed(2)}</span></div>
     <div class="kv"><span class="k">上下文占用</span><span class="v num">${fmt(t.ctx)} / ${fmt(t.window)}</span></div>
     <div class="kv"><span class="k">同工作区会话</span><span class="v num">${sameProj(s).length} 个</span></div>
-    <div class="kv"><span class="k">子 Agent</span><span class="v num faint">0（本宿主无谱系事件）</span></div>`;
+    <div class="kv"><span class="k">子 Agent</span><span class="v num">${(s.agents||[]).length || '0'}</span></div>`;
 
   $('#kpiSrc').innerHTML = `
     <h3 style="margin:0 0 2px">数据来源</h3>
@@ -547,29 +555,37 @@ function render(s){
       <span class="nm">输出（本次请求）</span><span class="vv num">${fmt(last.out)}</span></div>`;
 
   /* 耗时 */
-  const tsegs = [
-    {v:tm.model, c:'#6366F1', n:'模型耗时'},
-    {v:tm.tool,  c:'#F59E0B', n:'工具执行'},
-    {v:tm.idle,  c:'#DCD8CC', n:'空档（含人工等待）'}
-  ];
-  const tot = tsegs.reduce((a,b)=>a+b.v,0)||1;
-  donut($('#donutTime'), tsegs, 108, [fmtSec(s.wallSec), '活跃时长']);
-  $('#wallHint').textContent = '按事件时间戳拆解';
-  $('#legendTime').innerHTML = tsegs.map(x=>`<div class="lg"><i class="dot" style="background:${x.c}"></i>
-    <span class="nm">${x.n}</span><span class="vv num">${p1(x.v/tot*100)}%</span></div>`).join('')
-    + `<div class="lg"><span class="nm faint">平均每步</span><span class="vv num">${fmtSec(tot/s.steps)}</span></div>`;
+  if (noTiming){
+    $('#donutTime').innerHTML = `<div style="width:108px;height:108px;display:grid;place-items:center;
+      border-radius:50%;border:11px solid #F1EFE8;font-size:11px;color:#9AA1AB">无时间戳</div>`;
+    $('#wallHint').textContent = '宿主日志无逐事件时间戳';
+    $('#legendTime').innerHTML = '<div class="tiny faint">该宿主把事件时间统一记为文件修改时间，无法拆解模型/工具耗时。</div>';
+    $('#timeStrip').innerHTML = '';
+  } else {
+    const tsegs = [
+      {v:tm.model, c:'#6366F1', n:'模型耗时'},
+      {v:tm.tool,  c:'#F59E0B', n:'工具执行'},
+      {v:tm.idle,  c:'#DCD8CC', n:'空档（含人工等待）'}
+    ];
+    const tot = tsegs.reduce((a,b)=>a+b.v,0)||1;
+    donut($('#donutTime'), tsegs, 108, [fmtSec(s.wallSec), '活跃时长']);
+    $('#wallHint').textContent = '按事件时间戳拆解';
+    $('#legendTime').innerHTML = tsegs.map(x=>`<div class="lg"><i class="dot" style="background:${x.c}"></i>
+      <span class="nm">${x.n}</span><span class="vv num">${p1(x.v/tot*100)}%</span></div>`).join('')
+      + `<div class="lg"><span class="nm faint">平均每步</span><span class="vv num">${fmtSec(tot/s.steps)}</span></div>`;
 
-  /* 时间轴条：每步耗时 */
-  const rs = s.requests.slice(-70);
-  const maxMs = Math.max(1, ...rs.map(r=>r.ms + r.toolMs));
-  const w = 100/rs.length;
-  $('#timeStrip').innerHTML = rs.map((r,i)=>{
-    const mh = (r.ms/maxMs)*100, th = (r.toolMs/maxMs)*100;
-    return `<i style="position:absolute;left:${i*w}%;width:${w}%;height:100%">
-      <span style="position:absolute;left:0;bottom:0;width:100%;height:${mh}%;background:#6366F1;opacity:.85"></span>
-      <span style="position:absolute;left:0;top:0;width:100%;height:${th}%;background:#F59E0B"></span></i>`;
-  }).join('');
-  $('#timeStrip').style.position='relative';
+    /* 时间轴条：每步耗时 */
+    const rs = s.requests.slice(-70);
+    const maxMs = Math.max(1, ...rs.map(r=>r.ms + r.toolMs));
+    const w = 100/rs.length;
+    $('#timeStrip').innerHTML = rs.map((r,i)=>{
+      const mh = (r.ms/maxMs)*100, th = (r.toolMs/maxMs)*100;
+      return `<i style="position:absolute;left:${i*w}%;width:${w}%;height:100%">
+        <span style="position:absolute;left:0;bottom:0;width:100%;height:${mh}%;background:#6366F1;opacity:.85"></span>
+        <span style="position:absolute;left:0;top:0;width:100%;height:${th}%;background:#F59E0B"></span></i>`;
+    }).join('');
+    $('#timeStrip').style.position='relative';
+  }
 
   /* 会话累计 */
   $('#cumIO').textContent = `${s.est?'≈':''}${fmt(t.in)} / ${s.est?'≈':''}${fmt(t.out)}`;
@@ -783,19 +799,29 @@ function sameProj(s){
   return D.sessions.filter(x=>x.project===s.project && x.id!==s.id);
 }
 function renderFleet(s){
-  let kids = sameProj(s).slice(0,5);
-  let fallback = false;
-  if (!kids.length){
-    kids = D.sessions.filter(x=>x.id!==s.id).slice(0,4);
-    fallback = true;
-  }
-  const W = 660, H = kids.length ? 330 : 200, rowY = 236;
-  const cx = W/2;
-  const cardW = 168, cardH = 74;
-  const gap = kids.length ? (W - kids.length*cardW) / (kids.length+1) : 0;
+  const agents = s.agents || [];
+  const tasks = s.tasks || [];
 
-  const nodeCard = (x,y,w,h,title,tok,ctxPct,main) => `
-    <g>
+  /* 汇总条：子代理 / 任务状态 */
+  const strip = $('#fleetStrip');
+  if (agents.length || tasks.length){
+    const stN = {};
+    tasks.forEach(t=>{ stN[t.status] = (stN[t.status]||0)+1; });
+    strip.style.display = 'flex';
+    strip.innerHTML = `
+      <span class="chip b" style="font-size:11.5px">子代理 ${agents.length}</span>
+      <span class="tiny faint">Agent 调用 · 报告合计 ≈${fmt(agents.reduce((a,x)=>a+(x.reportTok||0),0))} tok</span>
+      <span class="fsep"></span>
+      <span class="chip g" style="font-size:11.5px">任务 ${tasks.length}</span>
+      <span class="tiny faint">已完成 ${stN.completed||0} · 进行中 ${stN.in_progress||0} · 待处理 ${stN.pending||0}</span>`;
+  } else {
+    strip.style.display = 'none';
+    strip.innerHTML = '';
+  }
+
+  const W = 660, cardW = 168, cardH = 74;
+  const nodeCard = (x,y,w,h,title,tok,ctxPct,main,tip) => `
+    <g>${tip?`<title>${esc(tip)}</title>`:''}
       <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10"
         fill="#fff" stroke="${main?'#C7C3F5':'#E7E3D9'}" stroke-width="${main?1.4:1}"/>
       <text x="${x+12}" y="${y+20}" font-size="11" font-weight="600" fill="#1F2328">
@@ -806,32 +832,70 @@ function renderFleet(s){
         fill="${main?'#6366F1':'#A855F7'}" opacity=".85"/>
     </g>`;
 
-  let svg = '';
-  const cy = kids.length ? 62 : (H-cardH)/2;
-  kids.forEach((k,i)=>{
-    const x = gap*(i+1) + cardW*i;
-    svg += `<path d="M ${cx} ${cy+cardH} C ${cx} ${cy+cardH+52}, ${x+cardW/2} ${rowY-52}, ${x+cardW/2} ${rowY}"
-      fill="none" stroke="#E2DEF0" stroke-width="1.3"/>`;
-  });
-  svg += nodeCard(cx-cardW/2, cy, cardW, cardH, s.title, `${fmt(s.totals.in+s.totals.out)} · ¥${s.totals.cost.toFixed(2)}`,
-    pct(s.totals.ctx, s.totals.window), true);
-  kids.forEach((k,i)=>{
-    const x = gap*(i+1) + cardW*i;
-    svg += nodeCard(x, rowY, cardW, cardH, k.title, `${fmt(k.totals.in+k.totals.out)} · ¥${k.totals.cost.toFixed(2)}`,
-      pct(k.totals.ctx, k.totals.window), false);
-  });
-  $('#netHost').innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">${svg}</svg>`;
-  $('#netHint').textContent = fallback
-    ? '本工作区仅此 1 个会话 · 图中为最近其它会话'
-    : `${1+kids.length} 个会话 · 同一工作区`;
+  const mainCard = nodeCard(W/2-cardW/2, 62, cardW, cardH, s.title,
+    `${fmt(s.totals.in+s.totals.out)} · ¥${s.totals.cost.toFixed(2)}`,
+    pct(s.totals.ctx, s.totals.window), true, '');
 
-  const all = [s, ...kids];
+  if (agents.length){
+    /* 真谱系：日志里的 Agent 调用 = 子代理委派，返回 = 最终报告 */
+    const kids = agents.slice(0, 6);
+    const H = 330, rowY = 236;
+    const cx = W/2;
+    const gap = (W - kids.length*cardW) / (kids.length+1);
+    const maxRep = Math.max(1, ...kids.map(a=>a.reportTok||0));
+    let svg = '';
+    kids.forEach((k,i)=>{
+      const x = gap*(i+1) + cardW*i;
+      svg += `<path d="M ${cx} 136 C ${cx} 188, ${x+cardW/2} ${rowY-52}, ${x+cardW/2} ${rowY}"
+        fill="none" stroke="#E2DEF0" stroke-width="1.3"/>`;
+    });
+    svg += mainCard;
+    kids.forEach((k,i)=>{
+      const x = gap*(i+1) + cardW*i;
+      const sub = (k.durMs!=null ? fmtSec(k.durMs/1000) : '无返回') + ` · 报告 ${fmt(k.reportTok||0)} tok`;
+      const tip = `${k.desc}\n\n── 委派 ──\n${k.prompt||''}\n\n── 报告 ──\n${k.report||'（无返回）'}`;
+      svg += nodeCard(x, rowY, cardW, cardH, k.desc, sub, (k.reportTok||0)/maxRep*100, false, tip);
+    });
+    $('#netHost').innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">${svg}</svg>`;
+    $('#netHint').textContent = `真实谱系 · ${agents.length} 个子代理` + (agents.length>6?`（图中显示 6 个）`:'');
+  } else {
+    /* 伪谱系：本会话没有 Agent 调用，按同一工作区会话聚合 */
+    let kids = sameProj(s).slice(0,5);
+    let fallback = false;
+    if (!kids.length){
+      kids = D.sessions.filter(x=>x.id!==s.id).slice(0,4);
+      fallback = true;
+    }
+    const H = kids.length ? 330 : 200, rowY = 236;
+    const cx = W/2;
+    const gap = kids.length ? (W - kids.length*cardW) / (kids.length+1) : 0;
+    let svg = '';
+    const cy = kids.length ? 62 : (H-cardH)/2;
+    kids.forEach((k,i)=>{
+      const x = gap*(i+1) + cardW*i;
+      svg += `<path d="M ${cx} ${cy+cardH} C ${cx} ${cy+cardH+52}, ${x+cardW/2} ${rowY-52}, ${x+cardW/2} ${rowY}"
+        fill="none" stroke="#E2DEF0" stroke-width="1.3"/>`;
+    });
+    svg += nodeCard(cx-cardW/2, cy, cardW, cardH, s.title, `${fmt(s.totals.in+s.totals.out)} · ¥${s.totals.cost.toFixed(2)}`,
+      pct(s.totals.ctx, s.totals.window), true, '');
+    kids.forEach((k,i)=>{
+      const x = gap*(i+1) + cardW*i;
+      svg += nodeCard(x, rowY, cardW, cardH, k.title, `${fmt(k.totals.in+k.totals.out)} · ¥${k.totals.cost.toFixed(2)}`,
+        pct(k.totals.ctx, k.totals.window), false, '');
+    });
+    $('#netHost').innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">${svg}</svg>`;
+    $('#netHint').textContent = fallback
+      ? '本工作区仅此 1 个会话 · 图中为最近其它会话'
+      : `${1+kids.length} 个会话 · 同一工作区`;
+  }
+
+  const all = [s, ...sameProj(s).slice(0,5)];
   $('#members').innerHTML = all.map((x,i)=>`
     <div class="member">
       <div class="avatar" style="background:${i===0?'#6366F1':'#A855F7'}">${i===0?'L':i}</div>
       <div style="flex:1;min-width:0">
         <div class="tt" title="${esc(x.title)}">${esc(x.title)}</div>
-        <div class="mt">${i===0?'主会话':(fallback?'最近会话':'同工作区会话')} · ${x.steps} 步 · ${fmtSec(x.wallSec)} · ${fmt(x.totals.in+x.totals.out)} tok</div>
+        <div class="mt">${i===0?'主会话':'同工作区会话'} · ${x.steps} 步 · ${fmtSec(x.wallSec)} · ${fmt(x.totals.in+x.totals.out)} tok</div>
         <div class="mt">上下文 ${fmt(x.totals.ctx)}（${pct(x.totals.ctx,x.totals.window).toFixed(1)}%）· 缓存 ${pct(x.totals.cached,x.totals.in).toFixed(0)}%</div>
       </div>
     </div>`).join('');
@@ -847,8 +911,32 @@ function renderFleet(s){
       <span class="num" style="width:34px;text-align:right;font-size:11px;font-weight:600">${v}</span>
     </div>`).join('');
 
-  $('#fleetNote').innerHTML = `本宿主的会话日志里没有子 Agent 谱系事件（<code>Agent</code>/<code>Task</code> 调用），
-    所以"编队"按<b>同一工作区的会话</b>聚合，而不是真实父子谱系。若日志里有 spawn 事件，这里可以直接换成树。`;
+  /* 任务面板 */
+  const tcard = $('#taskCard');
+  if (tasks.length){
+    tcard.style.display = '';
+    const ST = {completed:['已完成','#E8F7EE','#17864A'],
+                in_progress:['进行中','#E8F0FE','#1D4ED8'],
+                pending:['待处理','#F1EFE8','#6E7681']};
+    $('#taskPanel').innerHTML = tasks.map(t=>{
+      const [lbl,bg,fg] = ST[t.status] || ST.pending;
+      return `<div class="member">
+        <div class="avatar" style="background:${bg};color:${fg};font-size:9px">${esc(t.tid)}</div>
+        <div style="flex:1;min-width:0">
+          <div class="tt">${esc(t.subject || '(未命名任务)')}</div>
+          <div class="mt" title="${esc(t.desc)}">${esc(t.desc || '')}</div>
+        </div>
+        <span class="chip" style="background:${bg};color:${fg}">${lbl}</span>
+      </div>`;
+    }).join('');
+  } else {
+    tcard.style.display = 'none';
+    $('#taskPanel').innerHTML = '';
+  }
+
+  $('#fleetNote').innerHTML = agents.length
+    ? `谱系来自会话日志里的 <code>Agent</code> 调用与返回（真实父子关系）；任务面板来自 <code>TaskCreate</code>/<code>TaskUpdate</code> 事件。悬停节点可看委派内容与报告摘要。`
+    : `本会话日志里没有 <code>Agent</code> 子代理调用，"编队"按<b>同一工作区的会话</b>聚合展示。`;
 }
 
 /* ══════════ 总览（跨宿主汇总 + 筛选） ══════════ */
@@ -929,20 +1017,39 @@ function renderInsights(){
                  : state.f.time === '30' ? new Date().setHours(0,0,0,0) - 29*864e5 : 0;
   const winEnd = isCustom ? (cTo || Infinity) : Infinity;
   const daily = {};
+  const bump = (host, k, tin) => {
+    const d = daily[k] || (daily[k] = {in:0, byHost:{}});
+    d.in += tin;
+    d.byHost[host] = (d.byHost[host]||0) + tin;
+  };
   list.forEach(s=>{
-    s.requests.forEach(r=>{
-      if (!r.ts || r.ts < winStart || r.ts > winEnd) return;
-      let k;
-      if (hourly){
-        if (dayKey(r.ts) !== hourK) return;        // 单日视图只取那一天
-        k = hourK + ' ' + pad2(new Date(r.ts).getHours());
-      } else {
-        k = dayKey(r.ts);
+    const bk = s.daily;
+    if (bk && Object.keys(bk).length){
+      // 全量时间桶（'YYYY-MM-DD HH'）：逐请求累积，不受 600 点截断 / 降采样影响
+      for (const k in bk){
+        const ts = new Date(k.replace(' ', 'T') + ':00:00').getTime();
+        if (ts < winStart || ts > winEnd) continue;
+        if (hourly){
+          if (k.slice(0, 10) !== hourK) continue;      // 单日视图只取那一天
+          bump(s.host, k, bk[k].i);
+        } else {
+          bump(s.host, k.slice(0, 10), bk[k].i);
+        }
       }
-      const d = daily[k] || (daily[k] = {in:0, byHost:{}});
-      d.in += r.in;
-      d.byHost[s.host] = (d.byHost[s.host]||0) + r.in;
-    });
+    } else {
+      // 旧快照回退：逐请求聚合
+      s.requests.forEach(r=>{
+        if (!r.ts || r.ts < winStart || r.ts > winEnd) return;
+        let k;
+        if (hourly){
+          if (dayKey(r.ts) !== hourK) return;          // 单日视图只取那一天
+          k = hourK + ' ' + pad2(new Date(r.ts).getHours());
+        } else {
+          k = dayKey(r.ts);
+        }
+        bump(s.host, k, r.in);
+      });
+    }
   });
   let days;
   if (hourly){
@@ -1053,9 +1160,10 @@ function renderInsights(){
       + (empty.length?` · ${empty.join('、')} 有日志但无可用会话`:'')
       + (absent.length?` · ${absent.join('、')} 未安装`:'') + `</div>`
     + (probes.length
-        ? `<div style="margin-top:9px;color:#6E7681;font-weight:600;font-size:10.5px">已发现但拿不到 token（只清点，不进统计）</div>`
+        ? `<div style="margin-top:9px;color:#6E7681;font-weight:600;font-size:10.5px">已发现但拿不到 token（状态制清点，不进统计）</div>`
           + probes.map(p=>`<div class="probe"><span class="nm">${esc(p.name)}</span>
-              <span class="nt">${p.count} 项 · ${esc(p.note)}</span></div>`).join('')
+              <span class="chip">${esc(p.state || ((p.count ?? '') + ' 项'))}</span>
+              <span class="nt">${esc(p.note || '')}</span></div>`).join('')
         : '');
 
   /* 表格 */
@@ -1099,7 +1207,7 @@ function renderInsights(){
 
   $('#insFoot').innerHTML = `扫描 <code>~/.workbuddy-ai/projects</code>、<code>~/.qwen/projects</code>、
     <code>~/.claude/projects</code>、<code>~/.codex/sessions</code> · 只读 · 生成于 ${D.generatedAt}。
-    单会话请求点上限 ${600} 个，超长会话的按日统计可能略低。`;
+    每日/分时用量来自全量时间桶，不受请求点上限影响；单会话趋势图保留最近 ${600} 个请求点。`;
 }
 
 /* ── 工具 ── */
