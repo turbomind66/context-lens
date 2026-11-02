@@ -23,7 +23,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT_JS = os.path.join(HERE, "data.js")
 HOME = os.path.expanduser("~")
 
-CATS = ["host", "user", "assistant", "think", "targs", "tres"]
+CATS = ["host", "user", "inject", "assistant", "think", "targs", "tres"]
+
+_RE_INJECT = re.compile(r"<system-reminder\b[^>]*>.*?</system-reminder>", re.S)
+
+
+def split_inject(text):
+    """把 user 正文里的 <system-reminder> 注入块剥离出来。
+    返回 (真实用户文本, 注入文本)。"""
+    if not text or "<system-reminder" not in text:
+        return text or "", ""
+    parts = _RE_INJECT.findall(text)
+    inj = "\n".join(parts)
+    real = _RE_INJECT.sub("", text).strip()
+    return real, inj
 
 
 # ── 通用工具 ────────────────────────────────────────────────
@@ -150,6 +163,13 @@ class Builder:
         self.tasks = collections.OrderedDict()   # tid -> 任务 dict
         self._task_n = 0
         self._task_create_args = {} # TaskCreate 的 callId -> (args, ts)，等结果里回读 tid
+        self.models = collections.Counter()   # 逐请求模型占比（小写归一）
+        self._model_disp = {}                 # 小写 -> 首次原样名
+        self.cur_model = None
+        self.events = []                      # 上下文事件 inject/compact/fork/switch
+        self.fileops = {}                     # 相对路径 -> {r,w,s,add,del}
+        self.skills = collections.Counter()   # Skill 工具加载次数（按技能名）
+        self._prev_in = 0                     # 上一 step 的 input（压缩推断用）
 
     def _touch(self, ts):
         if not self.first_ts:
@@ -159,10 +179,17 @@ class Builder:
     def user(self, ts, text):
         self._touch(ts)
         self.turns += 1
-        n = est(text)
+        real, inj = split_inject(text)
+        ni = est(inj)
+        if ni:
+            self.cum["inject"] += ni
+            self.browser.append({"cat": "inject", "label": "注入内容", "tok": ni,
+                                 "step": self.step, "preview": inj[:170]})
+            self.events.append({"kind": "inject", "ts": ts, "step": self.step, "tok": ni})
+        n = est(real)
         self.cum["user"] += n
         self.browser.append({"cat": "user", "label": "用户消息", "tok": n,
-                             "step": self.step, "preview": (text or "")[:170]})
+                             "step": self.step, "preview": (real or "")[:170]})
         self.anchor = ts
 
     def assistant(self, ts, text):
@@ -183,7 +210,7 @@ class Builder:
                                  "step": self.step, "preview": (text or "")[:170]})
         # 思考不移动 anchor：模型耗时算到"上一次产出"为止
 
-    def call(self, ts, name, args_text, usage, call_id=None):
+    def call(self, ts, name, args_text, usage, call_id=None, req_id=None):
         self._touch(ts)
         self.step += 1
         name = name or "?"
@@ -219,6 +246,11 @@ class Builder:
         self.tin += i_tok
         self.tout += o_tok
         self.tcached += c_tok
+        if i_tok and self._prev_in and i_tok < self._prev_in * 0.6:
+            self.events.append({"kind": "compact", "ts": ts, "step": self.step,
+                                "rec": self._prev_in - i_tok})
+        if i_tok:
+            self._prev_in = i_tok
         hk = hour_key(ts)
         if hk:
             dd = self.daily.setdefault(hk, {"i": 0, "o": 0, "c": 0})
@@ -227,7 +259,7 @@ class Builder:
             dd["c"] += c_tok
         self.requests.append({
             "i": self.step, "ts": ts, "in": i_tok, "out": o_tok, "cached": c_tok,
-            "ms": model_ms, "toolMs": 0,
+            "ms": model_ms, "toolMs": 0, "rid": req_id,
             "comp": {k: round(v, 1) for k, v in comp.items()},
         })
         self.anchor = ts
@@ -326,6 +358,46 @@ class Builder:
             t["status"] = st
         t["updateTs"] = ts
 
+    # ── 模型 / 事件 / 文件活动 / 技能 ──────────────────────
+    def set_model(self, ts, model):
+        if not model:
+            return
+        key = str(model).strip().lower()
+        self._model_disp.setdefault(key, str(model).strip())
+        self.models[key] += 1
+        if self.cur_model and self.cur_model != key:
+            self.events.append({"kind": "switch", "ts": ts, "step": self.step,
+                                "from": self._model_disp.get(self.cur_model),
+                                "to": self._model_disp.get(key)})
+        self.cur_model = key
+
+    def event(self, kind, ts, **kw):
+        self.events.append(dict(kind=kind, ts=ts, step=self.step, **kw))
+
+    def _fo(self, path):
+        return self.fileops.setdefault(path, {"r": 0, "w": 0, "s": 0, "add": 0, "del": 0})
+
+    def file_op(self, path, kind, add=0, dele=0):
+        if not path:
+            return
+        p = str(path).replace("\\", "/")
+        p = os.path.normpath(p).replace("\\", "/")
+        rec = self._fo(p)
+        rec[kind] = rec.get(kind, 0) + 1
+        rec["add"] += int(add or 0)
+        rec["del"] += int(dele or 0)
+
+    def file_track(self, path, existed):
+        """file-history-snapshot：existed=false 视为新建，true 视为改已有（不重复计读）。"""
+        if not path:
+            return
+        p = os.path.normpath(str(path).replace("\\", "/")).replace("\\", "/")
+        self._fo(p)  # 确保有行
+
+    def skill(self, name):
+        if name:
+            self.skills[str(name)[:40]] += 1
+
     def finish(self, meta):
         # TaskCreate 没等到结果（会话被截断）也补一条，tid 用序号兜底
         for _cid, (args, ts) in self._task_create_args.items():
@@ -360,6 +432,11 @@ class Builder:
             "daily": self.daily,
             "agents": self.agents[:20],
             "tasks": list(self.tasks.values())[:50],
+            "models": {self._model_disp.get(k, k): v for k, v in self.models.most_common(6)},
+            "events": sorted(self.events, key=lambda e: e.get("ts") or 0)[:200],
+            "fileOps": sorted(({"path": p, **v} for p, v in self.fileops.items()),
+                              key=lambda x: -(x["r"] + x["w"] + x["s"]))[:40],
+            "skills": dict(self.skills.most_common(12)),
             "tools": dict(self.tools.most_common(12)),
             "toolCount": sum(self.tools.values()),
             "files": self.files,
@@ -408,6 +485,33 @@ def iter_jsonl(path):
                 continue
 
 
+def _wb_file_op(b, name, a_txt):
+    """Edit/Write/MultiEdit 的行数变化 + Read/Grep 的文件活动。路径相对化去用户名。"""
+    j = jargs(None, a_txt)
+    if not j:
+        return
+    path = j.get("file_path") or j.get("path") or j.get("notebook_path")
+    if name in ("Edit", "MultiEdit", "write_to_file", "replace"):
+        add = dele = 0
+        if name == "Edit":
+            o, nw = j.get("old_string") or "", j.get("new_string") or ""
+            add = max(0, len(nw.split("\n")) - len(o.split("\n")))
+            dele = max(0, len(o.split("\n")) - len(nw.split("\n")))
+        elif name == "MultiEdit":
+            for e in (j.get("edits") or []):
+                o, nw = e.get("old_string") or "", e.get("new_string") or ""
+                add += max(0, len(nw.split("\n")) - len(o.split("\n")))
+                dele += max(0, len(o.split("\n")) - len(nw.split("\n")))
+        b.file_op(path, "w", add, dele)
+    elif name in ("Write", "write_file", "WriteToFile"):
+        c = j.get("content") or ""
+        b.file_op(path, "w", len(c.split("\n")) if c else 0, 0)
+    elif name in ("Read", "read_file", "ReadFile", "view"):
+        b.file_op(path, "r")
+    elif name in ("Grep", "Glob", "search", "search_data"):
+        b.file_op(j.get("path") or j.get("pattern"), "s")
+
+
 def parse_workbuddy(path, host="workbuddy"):
     b = Builder()
     title = cwd = None
@@ -424,16 +528,27 @@ def parse_workbuddy(path, host="workbuddy"):
             txt = text_of(d.get("content"))
             (b.user if d.get("role") == "user" else b.assistant)(ts, txt)
         elif typ == "reasoning":
+            pd = d.get("providerData") or {}
+            b.set_model(ts, pd.get("model") or pd.get("requestModelName"))
             b.think(ts, text_of(d.get("rawContent") or d.get("content")))
+        elif typ == "resend-fork-notice":
+            b.event("fork", ts)
+        elif typ == "file-history-snapshot":
+            tfb = (d.get("snapshot") or {}).get("trackedFileBackups") or {}
+            if isinstance(tfb, dict):
+                for path, meta in tfb.items():
+                    b.file_track(path, (meta or {}).get("existedAtTrack"))
         elif typ == "function_call":
             name = d.get("name") or "?"
             a = d.get("arguments")
             a_txt = a if isinstance(a, str) else json.dumps(a, ensure_ascii=False)
+            pd = d.get("providerData") or {}
+            b.set_model(ts, pd.get("model") or pd.get("requestModelName"))
             u = (d.get("message") or {}).get("usage") or {}
             b.call(ts, name, a_txt, {
                 "in": u.get("input_tokens"), "out": u.get("output_tokens"),
                 "cached": u.get("cache_read_input_tokens"),
-            }, d.get("callId"))
+            }, d.get("callId"), req_id=pd.get("conversationRequestId"))
             if name == "Agent":                      # 子代理委派 → 编队真谱系
                 j = jargs(a, a_txt)
                 b.agent(ts, j.get("description"), j.get("prompt") or a_txt, d.get("callId"))
@@ -441,12 +556,16 @@ def parse_workbuddy(path, host="workbuddy"):
                 b.task_create(ts, jargs(a, a_txt), d.get("callId"))
             elif name == "TaskUpdate":
                 b.task_update(ts, jargs(a, a_txt))
+            elif name == "Skill":
+                j = jargs(a, a_txt)
+                b.skill(j.get("command") or j.get("skill") or j.get("name"))
             if name in ("Bash", "PowerShell"):
                 try:
                     j = json.loads(a_txt)
                     b.command(ts, j.get("command") or j.get("description") or a_txt)
                 except Exception:
                     b.command(ts, a_txt)
+            _wb_file_op(b, name, a_txt)
         elif typ == "function_call_result":
             out = d.get("output")
             o_txt = text_of(out) if isinstance(out, (list, str)) else text_of([out])
@@ -759,8 +878,9 @@ def read_workbuddy_index(db_path=None):
                 d["window"] = int(float(r["size"]))
             try:
                 cr = json.loads(r["credit_json"] or "{}")
-                d["credits"] = round(sum(float(v) for v in cr.values()
-                                         if isinstance(v, (int, float))), 3)
+                cr = {k: float(v) for k, v in cr.items() if isinstance(v, (int, float))}
+                d["credits"] = round(sum(cr.values()), 3)
+                d["creditByReq"] = cr          # 逐轮真实额度（键=conversationRequestId）
             except Exception:
                 pass
         con.close()
@@ -782,6 +902,18 @@ def apply_index(s, m):
         s["model"] = m["model"]
     if m.get("title"):
         s["title"] = m["title"]
+    # 逐轮真实额度：按 conversationRequestId 贴到该轮首个 step，避免同轮多步重复计
+    cbr = m.get("creditByReq")
+    if cbr:
+        seen = set()
+        for r in s["requests"]:
+            rid = r.get("rid")
+            if rid and rid in cbr and rid not in seen:
+                r["cr"] = cbr[rid]
+                seen.add(rid)
+            elif rid and rid in seen:
+                r["cr"] = 0
+        s["creditReal"] = round(sum(cbr.values()), 3)
     s["indexed"] = True
 
 
@@ -794,6 +926,7 @@ def make_index_session(sid, m, host="workbuddyai"):
         "startTs": m.get("createdAt") or 0, "endTs": m.get("lastAt") or 0,
         "wallSec": 0, "turns": 0, "steps": 0,
         "requests": [], "daily": {}, "agents": [], "tasks": [], "tools": {}, "toolCount": 0,
+        "models": {}, "events": [], "fileOps": [], "skills": {},
         "files": {"read": 0, "write": 0, "search": 0}, "commands": [], "browser": [],
         "totals": {"in": 0, "out": 0, "cached": 0,
                    "ctx": int(m.get("used") or 0),
@@ -1182,6 +1315,18 @@ def build_data(sessions, host_info):
     for w in workspaces.values():
         w["hosts"] = sorted(w["hosts"])
 
+    # 跨会话汇总：工具 / 命令程序 / 技能（总览页三块排行，点击可筛会话）
+    tally_tools = collections.Counter()
+    tally_cmds = collections.Counter()
+    tally_skills = collections.Counter()
+    for s in sessions:
+        for k, v in (s.get("tools") or {}).items():
+            tally_tools[k] += v
+        for c in (s.get("commands") or []):
+            tally_cmds[_prog_of(c.get("cmd"))] += 1
+        for k, v in (s.get("skills") or {}).items():
+            tally_skills[k] += v
+
     return {
         "generatedAt": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "contextWindow": CONTEXT_WINDOW,
@@ -1193,8 +1338,25 @@ def build_data(sessions, host_info):
                       "cost": round(v["cost"], 4), "sessions": len(v["ids"]),
                       "hosts": v["hosts"]} for k, v in sorted(daily.items())},
         "workspaces": sorted(workspaces.values(), key=lambda x: -x["sessions"]),
+        "tally": {"tools": tally_tools.most_common(14),
+                  "commands": tally_cmds.most_common(14),
+                  "skills": tally_skills.most_common(14)},
         "sessions": sessions,
     }
+
+
+_RE_PROG = re.compile(r"^\s*(?:sudo|env|doas|time|command)\s+", re.I)
+
+
+def _prog_of(cmd):
+    """命令串取程序名：剥掉 sudo/env/time 前缀，取首个可执行 token 的 basename。"""
+    c = str(cmd or "").strip()
+    if not c:
+        return "?"
+    c = _RE_PROG.sub("", c)
+    tok = re.split(r"[\s|;&]+", c)[0] or "?"
+    tok = os.path.basename(tok.replace("\\", "/"))
+    return tok[:24]
 
 
 def main():

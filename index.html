@@ -273,6 +273,17 @@
     </div>
 
     <div class="card" style="margin-top:12px">
+      <h3>活动热力图 <span class="hint">近 8 周每日计费 token · 点某天筛选当天</span></h3>
+      <div id="heatmap" style="overflow:auto"></div>
+    </div>
+
+    <div class="grid g-3" style="margin-top:12px">
+      <div class="card"><h3>工具调用 <span class="hint">跨会话 · 点击筛选</span></h3><div id="tallyTools"></div></div>
+      <div class="card"><h3>命令程序 <span class="hint">按派发计 · 点击筛选</span></h3><div id="tallyCmds"></div></div>
+      <div class="card"><h3>技能加载 <span class="hint">Skill 调用 · 点击筛选</span></h3><div id="tallySkills"></div></div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
       <h3>会话清单 <span class="hint">点任意一行进入该会话的上下文透视</span></h3>
       <div style="overflow:auto;max-height:520px">
         <table class="sess" id="sessTable"></table>
@@ -353,6 +364,23 @@
       <div class="chart-host" id="trendHost"><div class="tip" id="tip"></div></div>
     </div>
 
+    <div class="grid g-2" style="margin-top:12px">
+      <div class="card">
+        <h3>上下文事件 <span class="hint">注入 / 压缩 / 模型切换 / 重发</span></h3>
+        <div class="seg-btns" id="evFilter" style="margin-bottom:8px"></div>
+        <div class="brow" id="events" style="max-height:300px"></div>
+      </div>
+      <div class="card">
+        <h3>文件活动 <span class="hint">Agent 对文件做了什么</span></h3>
+        <div class="seg-btns" id="foFilter" style="margin-bottom:8px"></div>
+        <div class="brow" id="fileops" style="max-height:300px"></div>
+      </div>
+    </div>
+    <div class="card" id="cmdCard" style="margin-top:12px;display:none">
+      <h3>命令执行 <span class="hint" id="cmdHint"></span></h3>
+      <div id="cmdPanel"></div>
+    </div>
+
     <div class="foot" id="footNote"></div>
   </section>
 
@@ -387,12 +415,13 @@
 const CATS = {
   host:      {n:'系统提示词 + 工具定义', s:'宿主注入', c:'#6366F1'},
   user:      {n:'用户消息',              s:'用户消息', c:'#22C55E'},
+  inject:    {n:'注入内容',              s:'注入内容', c:'#EC4899'},
   assistant: {n:'助手消息',              s:'助手消息', c:'#0EA5E9'},
   think:     {n:'模型思考',              s:'模型思考', c:'#A855F7'},
   targs:     {n:'工具参数',              s:'工具参数', c:'#F59E0B'},
   tres:      {n:'工具结果',              s:'工具结果', c:'#F43F5E'}
 };
-const ORDER = ['host','user','assistant','think','targs','tres'];
+const ORDER = ['host','user','inject','assistant','think','targs','tres'];
 let D = window.LENS_DATA;
 let REV = (D && D.rev) || null;
 let LIVE = false;
@@ -400,7 +429,8 @@ let LIVE = false;
 let state = {
   sid: D.active, view:'insights', browMode:'group', trendMode:'total', open:new Set(),
   f: { hosts: new Set((D.hosts||[]).filter(h=>h.sessions>0).map(h=>h.id)),
-       ws:'all', time:'all', q:'', sort:'recent', from:'', to:'' }
+       ws:'all', time:'all', q:'', sort:'recent', from:'', to:'', tally:null },
+  evKind:'all', foKind:'all'
 };
 const $ = s => document.querySelector(s);
 const el = (t,c,h) => { const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.innerHTML=h; return e; };
@@ -493,6 +523,11 @@ function renderIndexOnly(s){
   $('#ctxNote').innerHTML = '';
   $('#browser').innerHTML = '<div class="empty">无日志明细</div>';
   $('#trendHost').innerHTML = '<div class="empty" style="padding:30px">无日志明细，无法还原趋势</div>';
+  $('#events').innerHTML = '<div class="empty tiny">无日志明细</div>';
+  $('#evFilter').innerHTML = '';
+  $('#fileops').innerHTML = '<div class="empty tiny">无日志明细</div>';
+  $('#foFilter').innerHTML = '';
+  $('#cmdCard').style.display = 'none';
   renderFleet(s);
   $('#footNote').innerHTML = `数据来自 <code>~/.workbuddy-ai/workbuddy.db</code> 的 sessions / session_usage 表 · 只读`;
 }
@@ -590,12 +625,14 @@ function render(s){
   /* 会话累计 */
   $('#cumIO').textContent = `${s.est?'≈':''}${fmt(t.in)} / ${s.est?'≈':''}${fmt(t.out)}`;
   $('#cumCache').textContent = s.est ? '— 宿主未上报' : `${hit.toFixed(2)}%  (${fmt(t.cached)} 命中)`;
-  $('#cumCost').textContent = s.est ? '—' : `¥${t.cost.toFixed(2)}（估算）`;
+  const crReal = s.creditReal;
+  $('#cumCost').textContent = crReal ? `${crReal} 额度（官方）`
+    : (s.est ? '—' : `¥${t.cost.toFixed(2)}（估算）`);
   $('#cumSpeed').textContent = s.est ? '—' : `${Math.round(t.out / Math.max(1, tm.model))} tok/s`;
   $('#cumTools').textContent = `${s.toolCount} / ${s.files.read+s.files.write+s.files.search}`;
   const cr = s.credits;
-  $('#cumCreditRow').style.display = cr ? '' : 'none';
-  if (cr) $('#cumCredit').textContent = `${cr} 额度`;
+  $('#cumCreditRow').style.display = (cr && !crReal) ? '' : 'none';
+  if (cr && !crReal) $('#cumCredit').textContent = `${cr} 额度`;
 
   /* 当前上下文 */
   const used = t.ctx, win = t.window, reserve = win*0.2;
@@ -640,6 +677,9 @@ function render(s){
 
   renderBrowser(s);
   renderTrend(s);
+  renderEvents(s);
+  renderFileOps(s);
+  renderCommands(s);
   renderFleet(s);
 
   $('#footNote').innerHTML = `数据：<code>~/.workbuddy-ai/projects/*/*.jsonl</code> · 只读 ·
@@ -769,8 +809,18 @@ function renderTrend(s){
     const x = padL + (iw/n)*idx + (iw/n)/2;
     ticks += `<text x="${x}" y="${H-5}" text-anchor="middle" font-size="9.5" fill="#9AA1AB">#${rs[idx].i}</text>`;
   }
+  // 压缩/重发事件标记（✂）落在对应 step 的柱顶
+  const stepIdx = {}; rs.forEach((r,i)=>stepIdx[r.i]=i);
+  let marks = '';
+  (s.events||[]).forEach(e=>{
+    if (e.kind!=='compact' && e.kind!=='fork') return;
+    const i = stepIdx[e.step]; if (i==null) return;
+    const x = padL + (iw/n)*i + (iw/n)/2;
+    const col = e.kind==='compact' ? '#F43F5E' : '#F59E0B';
+    marks += `<text x="${x}" y="${padT+8}" text-anchor="middle" font-size="9" fill="${col}">✂</text>`;
+  });
   host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" height="${H}">
-    ${g}${bars}${ticks}
+    ${g}${bars}${ticks}${marks}
     <text x="${padL-6}" y="${padT+4}" text-anchor="end" font-size="9" fill="#B9B3A4">tok</text>
   </svg><div class="tip" id="tip"></div>`;
 
@@ -802,18 +852,24 @@ function renderFleet(s){
   const agents = s.agents || [];
   const tasks = s.tasks || [];
 
-  /* 汇总条：子代理 / 任务状态 */
+  /* 汇总条：子代理 / 任务状态 / 编队合计 */
   const strip = $('#fleetStrip');
   if (agents.length || tasks.length){
     const stN = {};
     tasks.forEach(t=>{ stN[t.status] = (stN[t.status]||0)+1; });
+    const fam = [s, ...sameProj(s)];
+    const ctxSum = fam.reduce((a,x)=>a+(x.totals.ctx||0),0);
+    const costSum = fam.reduce((a,x)=>a+(x.creditReal||x.totals.cost||0),0);
+    const hasReal = fam.some(x=>x.creditReal);
     strip.style.display = 'flex';
     strip.innerHTML = `
       <span class="chip b" style="font-size:11.5px">子代理 ${agents.length}</span>
       <span class="tiny faint">Agent 调用 · 报告合计 ≈${fmt(agents.reduce((a,x)=>a+(x.reportTok||0),0))} tok</span>
       <span class="fsep"></span>
       <span class="chip g" style="font-size:11.5px">任务 ${tasks.length}</span>
-      <span class="tiny faint">已完成 ${stN.completed||0} · 进行中 ${stN.in_progress||0} · 待处理 ${stN.pending||0}</span>`;
+      <span class="tiny faint">已完成 ${stN.completed||0} · 进行中 ${stN.in_progress||0} · 待处理 ${stN.pending||0}</span>
+      <span class="fsep"></span>
+      <span class="tiny faint">编队 ${fam.length} 会话 · 上下文合计 ${fmt(ctxSum)} · ${hasReal?'额度':'成本'}合计 ${hasReal?costSum.toFixed(2)+' 额度':'¥'+costSum.toFixed(2)}</span>`;
   } else {
     strip.style.display = 'none';
     strip.innerHTML = '';
@@ -890,15 +946,18 @@ function renderFleet(s){
   }
 
   const all = [s, ...sameProj(s).slice(0,5)];
-  $('#members').innerHTML = all.map((x,i)=>`
+  $('#members').innerHTML = all.map((x,i)=>{
+    const mdl = x.model || Object.keys(x.models||{})[0] || '';
+    return `
     <div class="member">
       <div class="avatar" style="background:${i===0?'#6366F1':'#A855F7'}">${i===0?'L':i}</div>
       <div style="flex:1;min-width:0">
         <div class="tt" title="${esc(x.title)}">${esc(x.title)}</div>
-        <div class="mt">${i===0?'主会话':'同工作区会话'} · ${x.steps} 步 · ${fmtSec(x.wallSec)} · ${fmt(x.totals.in+x.totals.out)} tok</div>
+        <div class="mt">${i===0?'主会话':'同工作区会话'} · ${x.steps} 步 · ${fmtSec(x.wallSec)} · ${fmt(x.totals.in+x.totals.out)} tok${mdl?` · <span style="color:#A855F7">${esc(trunc(mdl,18))}</span>`:''}</div>
         <div class="mt">上下文 ${fmt(x.totals.ctx)}（${pct(x.totals.ctx,x.totals.window).toFixed(1)}%）· 缓存 ${pct(x.totals.cached,x.totals.in).toFixed(0)}%</div>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   $('#memHint').textContent = `${all.length} 个`;
 
   const tk = Object.entries(s.tools);
@@ -970,8 +1029,159 @@ function filteredSessions(){
       const b = f.to   ? new Date(f.to+'T23:59:59.999').getTime() : Infinity;
       if (s.endTs < a || s.endTs > b) return false;
     }
+    if (f.tally){
+      const {type, name} = f.tally;
+      if (type==='tools' && !(s.tools && s.tools[name])) return false;
+      if (type==='skills' && !(s.skills && s.skills[name])) return false;
+      if (type==='commands'){
+        if (!(s.commands||[]).some(c => progOf(c.cmd)===name)) return false;
+      }
+    }
     return true;
   });
+}
+
+function progOf(cmd){
+  let c = String(cmd||'').trim();
+  if (!c) return '?';
+  c = c.replace(/^(sudo|env|doas|time|command)\s+/i, '');
+  const tok = (c.split(/[\s|;&]+/)[0] || '?');
+  const base = tok.replace(/\\/g,'/').split('/').pop();
+  return base.slice(0,24);
+}
+
+/* ── 活动热力图（近 8 周） ── */
+function renderHeatmap(){
+  const host = $('#heatmap'); if (!host) return;
+  const daily = D.daily || {};
+  const cells = [];
+  const today = new Date(); today.setHours(0,0,0,0);
+  // 对齐到本周周一结尾的 8 周网格（56 天）
+  const end = new Date(today); end.setDate(end.getDate() + (6 - end.getDay()));
+  const start = new Date(end); start.setDate(start.getDate() - 55);
+  let maxv = 1;
+  for (let d=new Date(start); d<=end; d.setDate(d.getDate()+1)){
+    const k = dayKey(d.getTime());
+    const v = (daily[k]||{}).in || 0; if (v>maxv) maxv=v;
+  }
+  const color = v => { if(!v) return '#F1EFE8';
+    const t = Math.min(1, Math.log10(v+1)/Math.log10(maxv+1));
+    const a = 0.12 + t*0.88; return `rgba(99,102,241,${a.toFixed(2)})`; };
+  let html = '<div style="display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,14px);gap:3px;width:max-content">';
+  for (let d=new Date(start); d<=end; d.setDate(d.getDate()+1)){
+    const k = dayKey(d.getTime()); const v = (daily[k]||{}).in||0;
+    const dow = d.getDay();
+    if (dow===0 && d>start) html += '</div><div style="display:grid;grid-template-rows:repeat(7,14px);gap:3px">';
+    html += `<div title="${k} · ${fmt(v)} tok" data-day="${k}" style="width:14px;height:14px;border-radius:3px;background:${color(v)};cursor:${v?'pointer':'default'}"></div>`;
+  }
+  html += '</div>';
+  host.innerHTML = html;
+  host.querySelectorAll('[data-day]').forEach(c=>{
+    if (!c.dataset.day) return;
+    c.onclick = ()=>{
+      const day = c.dataset.day;
+      if (state.f.time==='custom' && state.f.from===day && state.f.to===day){ state.f.time='all'; state.f.tally=null; }
+      else { state.f.time='custom'; state.f.from=day; state.f.to=day; }
+      $('#fTime').value = state.f.time; syncRangeUI(); renderInsights();
+    };
+  });
+}
+
+/* ── 跨会话工具/命令/技能榜 ── */
+function tallyBlock(host, pairs, type){
+  if (!host) return;
+  const arr = (pairs||[]).slice(0,10);
+  if (!arr.length){ host.innerHTML = '<div class="empty tiny">无</div>'; return; }
+  const max = Math.max(1, ...arr.map(p=>p[1]));
+  const active = state.f.tally && state.f.tally.type===type;
+  host.innerHTML = arr.map(([name,v])=>{
+    const on = active && state.f.tally.name===name;
+    return `<div class="distrow" data-t="${esc(name)}" style="cursor:pointer">
+      <span class="nm" style="${on?'font-weight:700;color:#1F2328':''}">${esc(name)}</span>
+      <span class="bar"><i style="width:${v/max*100}%;background:${on?'#6366F1':'#C7C3F5'}"></i></span>
+      <span class="vv num">${v}</span></div>`;
+  }).join('');
+  host.querySelectorAll('[data-t]').forEach(row=>{
+    row.onclick = ()=>{
+      const name = row.dataset.t;
+      state.f.tally = (state.f.tally && state.f.tally.type===type && state.f.tally.name===name)
+        ? null : {type, name};
+      renderInsights();
+    };
+  });
+}
+function renderTallies(){
+  const t = D.tally || {};
+  tallyBlock($('#tallyTools'), t.tools, 'tools');
+  tallyBlock($('#tallyCmds'), t.commands, 'commands');
+  tallyBlock($('#tallySkills'), t.skills, 'skills');
+}
+
+/* ── 上下文事件卡 ── */
+const EVK = {inject:['注入','#EC4899'], compact:['压缩','#F43F5E'], switch:['切换','#A855F7'], fork:['重发','#F59E0B']};
+function renderEvents(s){
+  const host = $('#events'); const fbar = $('#evFilter');
+  const ev = s.events || [];
+  const cnt = {}; ev.forEach(e=>cnt[e.kind]=(cnt[e.kind]||0)+1);
+  const kinds = ['all','inject','compact','switch','fork'];
+  fbar.innerHTML = kinds.map(k=>{
+    const n = k==='all'?ev.length:(cnt[k]||0);
+    return `<button class="${state.evKind===k?'on':''}" data-k="${k}" ${n?'':'disabled style="opacity:.35"'}>${k==='all'?'全部':EVK[k][0]} ${n}</button>`;
+  }).join('');
+  fbar.querySelectorAll('button').forEach(b=>b.onclick=()=>{ state.evKind=b.dataset.k; renderEvents(cur()); });
+  const show = ev.filter(e=>state.evKind==='all'||e.kind===state.evKind).slice(-80).reverse();
+  if (!show.length){ host.innerHTML='<div class="empty tiny">该会话无上下文事件</div>'; return; }
+  host.innerHTML = show.map(e=>{
+    const [lbl,c] = EVK[e.kind]||['事件','#9AA1AB'];
+    let extra = '';
+    if (e.kind==='inject') extra = `≈${fmt(e.tok)} tok`;
+    else if (e.kind==='compact') extra = `回收 ≈${fmt(e.rec)} tok`;
+    else if (e.kind==='switch') extra = `${esc(e.from||'?')} → ${esc(e.to||'?')}`;
+    const ts = e.ts? new Date(e.ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'';
+    return `<div class="bitem" style="cursor:default"><i class="dot" style="background:${c}"></i>
+      <span class="tx">${lbl} <span class="faint">#${e.step}</span> · ${esc(extra)}</span>
+      <span class="tk num">${ts}</span></div>`;
+  }).join('');
+}
+
+/* ── 文件活动卡 ── */
+function renderFileOps(s){
+  const host = $('#fileops'); const fbar = $('#foFilter');
+  const fo = s.fileOps || [];
+  const f = state.foKind;
+  fbar.innerHTML = ['all','r','w','s'].map(k=>{
+    const n = k==='all'?fo.length:fo.filter(x=>x[k]>0).length;
+    const lbl = {all:'全部',r:'读取',w:'写入',s:'搜索'}[k];
+    return `<button class="${f===k?'on':''}" data-k="${k}" ${n?'':'disabled style="opacity:.35"'}>${lbl} ${n}</button>`;
+  }).join('');
+  fbar.querySelectorAll('button').forEach(b=>b.onclick=()=>{ state.foKind=b.dataset.k; renderFileOps(cur()); });
+  const show = fo.filter(x=>f==='all'||x[f]>0).slice(0,60);
+  if (!show.length){ host.innerHTML='<div class="empty tiny">该会话无文件操作记录</div>'; return; }
+  host.innerHTML = show.map(x=>{
+    const diff = (x.add||x.del) ? `<span style="color:#17864A">+${x.add}</span>/<span style="color:#B91C1C">−${x.del}</span>` : '';
+    return `<div class="bitem" style="cursor:default"><i class="dot" style="background:#0EA5E9"></i>
+      <span class="tx" title="${esc(x.path)}">${esc(x.path)}</span>
+      <span class="tk num">${x.r?`读${x.r} `:''}${x.w?`写${x.w} `:''}${x.s?`搜${x.s} `:''}${diff}</span></div>`;
+  }).join('');
+}
+
+/* ── 命令执行卡 ── */
+function renderCommands(s){
+  const card = $('#cmdCard'); const cmds = s.commands || [];
+  if (!cmds.length){ card.style.display='none'; return; }
+  card.style.display='';
+  const progs = {};
+  cmds.forEach(c=>{ const p=progOf(c.cmd); progs[p]=(progs[p]||0)+1; });
+  const top = Object.entries(progs).sort((a,b)=>b[1]-a[1]).slice(0,6);
+  $('#cmdHint').textContent = `${cmds.length} 次派发 · ${Object.keys(progs).length} 种程序`;
+  $('#cmdPanel').innerHTML =
+    `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">` +
+    top.map(([p,n])=>`<span class="chip">${esc(p)} ${n}</span>`).join('') + `</div>` +
+    `<div class="brow" style="max-height:220px">` + cmds.slice(-40).reverse().map(c=>{
+      const ts = c.ts? new Date(c.ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'';
+      return `<div class="bitem" style="cursor:default"><i class="dot" style="background:#F59E0B"></i>
+        <span class="tx">${esc(c.cmd)}</span><span class="tk num">${ts}</span></div>`;
+    }).join('') + `</div>`;
 }
 
 function renderInsights(){
@@ -1207,7 +1417,12 @@ function renderInsights(){
 
   $('#insFoot').innerHTML = `扫描 <code>~/.workbuddy-ai/projects</code>、<code>~/.qwen/projects</code>、
     <code>~/.claude/projects</code>、<code>~/.codex/sessions</code> · 只读 · 生成于 ${D.generatedAt}。
-    每日/分时用量来自全量时间桶，不受请求点上限影响；单会话趋势图保留最近 ${600} 个请求点。`;
+    每日/分时用量来自全量时间桶，不受请求点上限影响；单会话趋势图保留最近 ${600} 个请求点。` +
+    (state.f.tally ? ` <span class="chip b" id="tallyClear" style="cursor:pointer">筛选：${esc(state.f.tally.name)} ×</span>` : '');
+  const tc = $('#tallyClear'); if (tc) tc.onclick = ()=>{ state.f.tally=null; renderInsights(); };
+  renderHeatmap();
+  renderTallies();
+  savePrefs();
 }
 
 /* ── 工具 ── */
@@ -1305,13 +1520,42 @@ function buildPicker(){
   picker.onchange = ()=>{ state.sid = picker.value; state.open.clear(); setView('context'); };
 }
 
+/* ── 偏好持久化（localStorage，本地文件/本地服务可用） ── */
+const PREF_KEY = 'clens:prefs';
+function savePrefs(){
+  try{
+    const f = state.f;
+    localStorage.setItem(PREF_KEY, JSON.stringify({
+      hosts:[...f.hosts], ws:f.ws, time:f.time, from:f.from, to:f.to, sort:f.sort,
+      browMode:state.browMode, trendMode:state.trendMode, view:state.view }));
+  }catch(e){/* 隐私模式或禁用存储时静默忽略 */}
+}
+function loadPrefs(){
+  let p; try{ p = JSON.parse(localStorage.getItem(PREF_KEY) || 'null'); }catch(e){ return; }
+  if (!p) return;
+  const valid = new Set((D.hosts||[]).filter(h=>h.sessions>0).map(h=>h.id));
+  if (Array.isArray(p.hosts)){ const hs = p.hosts.filter(h=>valid.has(h)); if (hs.length) state.f.hosts = new Set(hs); }
+  ['ws','time','from','to','sort'].forEach(k=>{ if (p[k]!=null) state.f[k]=p[k]; });
+  if (p.browMode) state.browMode = p.browMode;
+  if (p.trendMode) state.trendMode = p.trendMode;
+  if (['insights','context','fleet'].includes(p.view)) state._prefView = p.view;
+}
+function applyPrefControls(){
+  const setv = (sel,v)=>{ const e=$(sel); if(e && v!=null) e.value=v; };
+  setv('#fTime', state.f.time); setv('#fSort', state.f.sort); setv('#fWs', state.f.ws);
+  const syncBtn=(sel,m)=>document.querySelectorAll(sel+' button').forEach(b=>b.classList.toggle('on', b.dataset.m===m));
+  syncBtn('#browMode', state.browMode); syncBtn('#trendMode', state.trendMode);
+}
+
 function boot(){
+  loadPrefs();
   buildPicker();
 
   document.querySelectorAll('.tab[data-view]').forEach(t=>{
     t.onclick = ()=> setView(t.dataset.view);
   });
   buildFilters();
+  applyPrefControls();
 
   // 深链接：?trend=delta&brow=dna  /  #fleet #context #insights
   const q = new URLSearchParams(location.search);
@@ -1336,13 +1580,13 @@ function boot(){
     if (e.target.tagName!=='BUTTON') return;
     [...e.currentTarget.children].forEach(b=>b.classList.toggle('on', b===e.target));
     state.browMode = e.target.dataset.m;
-    renderBrowser(cur());
+    renderBrowser(cur()); savePrefs();
   };
   $('#trendMode').onclick = e=>{
     if (e.target.tagName!=='BUTTON') return;
     [...e.currentTarget.children].forEach(b=>b.classList.toggle('on', b===e.target));
     state.trendMode = e.target.dataset.m;
-    renderTrend(cur());
+    renderTrend(cur()); savePrefs();
   };
   let rt; window.onresize = ()=>{ clearTimeout(rt); rt=setTimeout(()=>{
     if (state.view==='context') renderTrend(cur());
@@ -1351,7 +1595,7 @@ function boot(){
 
   buildPicker();
   const h = (location.hash||'').replace('#','');
-  setView(['insights','context','fleet'].includes(h) ? h : 'insights');
+  setView(['insights','context','fleet'].includes(h) ? h : (state._prefView || 'insights'));
   initLive();
 }
 
@@ -1430,6 +1674,7 @@ function setView(v){
   $('#view-context').style.display = v==='context'?'':'none';
   $('#view-fleet').style.display = v==='fleet'?'':'none';
   draw();
+  savePrefs();
 }
 
 if (!D.sessions.length){
