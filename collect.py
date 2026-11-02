@@ -16,9 +16,25 @@ import json, os, glob, ast, collections, datetime, sqlite3, re, struct
 
 # ── 可调参数 ────────────────────────────────────────────────
 CONTEXT_WINDOW = 1_000_000          # 上下文窗口大小（按你的模型改）
-PRICE = {"cache": 0.02, "input": 0.50, "output": 4.00}   # ¥/百万 token，估算用
+PRICE = {"cache": 0.02, "input": 0.50, "output": 4.00}   # ¥/百万 token，估算用（默认/未知模型）
+# 按模型子串匹配的离线价表（¥/百万 token）：cache=缓存读、input=未命中输入、output=输出。
+# DeepSeek 挂牌价为谷时价，peak 为高峰倍数（本地 09:00–21:00 计费翻倍）。命中顺序取首个匹配子串。
+MODEL_PRICE = [
+    ("deepseek-v4-pro",  {"cache": 0.025, "input": 3.0,  "output": 6.0,  "peak": 1.0}),
+    ("deepseek-v4",      {"cache": 0.02,  "input": 1.0,  "output": 2.0,  "peak": 2.0}),
+    ("deepseek",         {"cache": 0.02,  "input": 1.0,  "output": 2.0,  "peak": 2.0}),
+    ("qwen3",            {"cache": 0.004, "input": 0.3,  "output": 3.0,  "peak": 1.0}),
+    ("qwen",             {"cache": 0.004, "input": 0.8,  "output": 8.0,  "peak": 1.0}),
+    ("kimi-k2",          {"cache": 0.02,  "input": 4.0,  "output": 16.0, "peak": 1.0}),
+    ("glm",              {"cache": 0.002, "input": 1.0,  "output": 4.0,  "peak": 1.0}),
+    ("minimax",          {"cache": 0.01,  "input": 1.0,  "output": 4.0,  "peak": 1.0}),
+    ("gpt",              {"cache": 0.05,  "input": 2.5,  "output": 10.0, "peak": 1.0}),
+    ("hy3",              {"cache": 0.02,  "input": 0.5,  "output": 4.0,  "peak": 1.0}),
+]
 MAX_REQUESTS = 600
 MAX_BROWSER = 70
+PREVIEW = 170                   # 浏览器条目正文预览截断长度
+FULL = False                    # serve 按需取全文时临时置 True（不写盘，仅响应单次请求）
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT_JS = os.path.join(HERE, "data.js")
 HOME = os.path.expanduser("~")
@@ -129,9 +145,31 @@ def norm_comp(cum, actual):
     return {c: comp[c] * k for c in CATS}
 
 
-def cost_of(cached, inp, out):
+def cost_of(cached, inp, out, price=None):
+    p = price or PRICE
     uncached = max(0, inp - cached)
-    return (cached * PRICE["cache"] + uncached * PRICE["input"] + out * PRICE["output"]) / 1e6
+    return (cached * p["cache"] + uncached * p["input"] + out * p["output"]) / 1e6
+
+
+def price_for(model):
+    """按模型子串命中离线价表；DeepSeek 类含高峰倍数（本地 09–21 点翻倍）。"""
+    key = (model or "").strip().lower()
+    for sub, p in MODEL_PRICE:
+        if sub in key:
+            return p
+    return dict(PRICE, peak=1.0)
+
+
+def peak_mult(price, ts):
+    """价格表带 peak>1 且时间落在本地 09:00–21:00 时返回高峰倍数。"""
+    m = price.get("peak", 1.0) or 1.0
+    if m <= 1.0 or not ts:
+        return 1.0
+    try:
+        h = datetime.datetime.fromtimestamp(ts / 1000).hour
+    except Exception:
+        return 1.0
+    return m if 9 <= h < 21 else 1.0
 
 
 # ── 归一化构建器 ────────────────────────────────────────────
@@ -176,6 +214,12 @@ class Builder:
             self.first_ts = ts
         self.last_ts = ts
 
+    def _bappend(self, cat, label, tok, step, text):
+        """浏览器条目：带稳定序号 n（供 serve 按需回读全文），预览按 PREVIEW 截断。"""
+        n = getattr(self, "_bn", 0); self._bn = n + 1
+        self.browser.append({"cat": cat, "label": label, "tok": tok, "step": step, "n": n,
+                             "preview": (text if FULL else (text or "")[:PREVIEW])})
+
     def user(self, ts, text):
         self._touch(ts)
         self.turns += 1
@@ -183,13 +227,11 @@ class Builder:
         ni = est(inj)
         if ni:
             self.cum["inject"] += ni
-            self.browser.append({"cat": "inject", "label": "注入内容", "tok": ni,
-                                 "step": self.step, "preview": inj[:170]})
+            self._bappend("inject", "注入内容", ni, self.step, inj)
             self.events.append({"kind": "inject", "ts": ts, "step": self.step, "tok": ni})
         n = est(real)
         self.cum["user"] += n
-        self.browser.append({"cat": "user", "label": "用户消息", "tok": n,
-                             "step": self.step, "preview": (real or "")[:170]})
+        self._bappend("user", "用户消息", n, self.step, real or "")
         self.anchor = ts
 
     def assistant(self, ts, text):
@@ -197,8 +239,7 @@ class Builder:
         n = est(text)
         self.cum["assistant"] += n
         if n:
-            self.browser.append({"cat": "assistant", "label": "助手消息", "tok": n,
-                                 "step": self.step, "preview": (text or "")[:170]})
+            self._bappend("assistant", "助手消息", n, self.step, text or "")
         self.anchor = ts
 
     def think(self, ts, text):
@@ -206,8 +247,7 @@ class Builder:
         n = est(text)
         self.cum["think"] += n
         if n:
-            self.browser.append({"cat": "think", "label": "模型思考", "tok": n,
-                                 "step": self.step, "preview": (text or "")[:170]})
+            self._bappend("think", "模型思考", n, self.step, text or "")
         # 思考不移动 anchor：模型耗时算到"上一次产出"为止
 
     def call(self, ts, name, args_text, usage, call_id=None, req_id=None):
@@ -218,8 +258,7 @@ class Builder:
         a_txt = args_text if isinstance(args_text, str) else json.dumps(args_text, ensure_ascii=False)
         na = est(a_txt)
         self.cum["targs"] += na
-        self.browser.append({"cat": "targs", "label": f"工具参数 · {name}", "tok": na,
-                             "step": self.step, "preview": a_txt[:170]})
+        self._bappend("targs", f"工具参数 · {name}", na, self.step, a_txt)
 
         if call_id is None:
             self._cid += 1
@@ -258,7 +297,7 @@ class Builder:
             dd["o"] += o_tok
             dd["c"] += c_tok
         self.requests.append({
-            "i": self.step, "ts": ts, "in": i_tok, "out": o_tok, "cached": c_tok,
+            "i": self.step, "ts": ts, "turn": self.turns, "in": i_tok, "out": o_tok, "cached": c_tok,
             "ms": model_ms, "toolMs": 0, "rid": req_id,
             "comp": {k: round(v, 1) for k, v in comp.items()},
         })
@@ -274,8 +313,7 @@ class Builder:
         name = name or "?"
         nr = est(out_text)
         self.cum["tres"] += nr
-        self.browser.append({"cat": "tres", "label": f"工具结果 · {name}", "tok": nr,
-                             "step": self.step, "preview": (out_text or "")[:170]})
+        self._bappend("tres", f"工具结果 · {name}", nr, self.step, out_text or "")
         low = name.lower()
         if low in ("read", "read_file", "readfile", "view"):
             self.files["read"] += 1
@@ -296,8 +334,7 @@ class Builder:
         a_txt = args_text if isinstance(args_text, str) else json.dumps(args_text, ensure_ascii=False)
         na = est(a_txt)
         self.cum["targs"] += na
-        self.browser.append({"cat": "targs", "label": f"工具参数 · {name}", "tok": na,
-                             "step": self.step, "preview": a_txt[:170]})
+        self._bappend("targs", f"工具参数 · {name}", na, self.step, a_txt)
 
     # ── 子代理与任务（编队页真谱系） ──────────────────────
     def agent(self, ts, desc, prompt, call_id):
@@ -406,6 +443,12 @@ class Builder:
             return None
         reqs = list(self.requests)
         last = reqs[-1]
+        # 会话主模型 → 离线价表；逐请求按高峰时段倍率累加
+        pm = self.models.most_common(1)
+        price = price_for(self._model_disp.get(pm[0][0]) if pm else None)
+        cost = 0.0
+        for r in reqs:
+            cost += cost_of(r["cached"], r["in"], r["out"], price) * peak_mult(price, r["ts"])
         wall = max(0.0, ((self.last_ts or 0) - (self.first_ts or 0)) / 1000.0)
         for r in reqs:
             r["toolMs"] = round(self.step_tool.get(r["i"], 0) * 1000)
@@ -445,8 +488,10 @@ class Builder:
             "totals": {
                 "in": self.tin, "out": self.tout, "cached": self.tcached,
                 "ctx": last["in"], "window": CONTEXT_WINDOW,
-                "cost": round(cost_of(self.tcached, self.tin, self.tout), 4),
+                "cost": round(cost, 4),
             },
+            "priceUsed": {"cache": price["cache"], "input": price["input"], "output": price["output"],
+                          "peak": price.get("peak", 1.0)},
             "timing": {
                 "model": round(self.t_model, 1),
                 "tool": round(self.t_tool, 1),
@@ -499,6 +544,8 @@ def _wb_file_op(b, name, a_txt):
             dele = max(0, len(o.split("\n")) - len(nw.split("\n")))
         elif name == "MultiEdit":
             for e in (j.get("edits") or []):
+                if not isinstance(e, dict):
+                    continue
                 o, nw = e.get("old_string") or "", e.get("new_string") or ""
                 add += max(0, len(nw.split("\n")) - len(o.split("\n")))
                 dele += max(0, len(o.split("\n")) - len(nw.split("\n")))
@@ -565,7 +612,10 @@ def parse_workbuddy(path, host="workbuddy"):
                     b.command(ts, j.get("command") or j.get("description") or a_txt)
                 except Exception:
                     b.command(ts, a_txt)
-            _wb_file_op(b, name, a_txt)
+            try:
+                _wb_file_op(b, name, a_txt)
+            except Exception:
+                pass
         elif typ == "function_call_result":
             out = d.get("output")
             o_txt = text_of(out) if isinstance(out, (list, str)) else text_of([out])
@@ -1200,6 +1250,7 @@ def scan(cache=None, verbose=False):
             for s in got:
                 s["host"] = h["id"]
                 s["est"] = bool(s.get("est"))
+                s["src"] = f            # 源日志路径：serve 按需回读全文用（make_public 会清空）
                 mine.append(s)
                 ok += 1
         sessions.extend(mine)

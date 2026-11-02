@@ -37,6 +37,42 @@ def refresh():
         return rev, raw, False
 
 
+def full_item(sid, step, cat, label):
+    """按会话 id + (step,cat,label) 重新解析源日志返回未截断正文（F11 按需取全文）。
+    用 step/cat/label 而非序号匹配：序号会随会话增长/降采样窗口漂移，而 step 稳定。
+    临时放大 MAX_BROWSER 让 re-parse 不截断 browser，保证命中。"""
+    src = host = None
+    with LOCK:
+        for ent in CACHE.values():
+            for s in ent["s"]:
+                if s.get("id") == sid:
+                    src, host = s.get("src"), s.get("host")
+                    break
+            if src:
+                break
+    if not src or not host:
+        return None
+    h = next((x for x in collect.HOSTS if x["id"] == host), None)
+    if not h:
+        return None
+    old_full, old_mb = collect.FULL, collect.MAX_BROWSER
+    collect.FULL, collect.MAX_BROWSER = True, 10_000_000
+    try:
+        got = h["parse"](src)
+        if isinstance(got, dict):
+            got = [got]
+        for s in (got or []):
+            for b in (s.get("browser") or []):
+                if b.get("step") == step and b.get("cat") == cat and b.get("label") == label:
+                    return {"cat": b["cat"], "label": b["label"], "step": b["step"],
+                            "tok": b["tok"], "text": b["preview"]}
+    except Exception:
+        return None
+    finally:
+        collect.FULL, collect.MAX_BROWSER = old_full, old_mb
+    return None
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -77,6 +113,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if qs.get("rev", [""])[0] == rev:
                 return self._send(200, json.dumps({"rev": rev, "unchanged": True}).encode(), gz=True)
             return self._send(200, raw, gz=True)
+
+        if path == "/api/item":
+            sid = qs.get("sid", [""])[0]
+            cat = qs.get("cat", [""])[0]
+            label = qs.get("label", [""])[0]
+            try:
+                step = int(qs.get("step", ["-1"])[0])
+            except Exception:
+                step = -1
+            r = full_item(sid, step, cat, label)
+            if r is None:
+                return self._send(404, json.dumps({"error": "not found"}).encode())
+            return self._send(200, json.dumps(r, ensure_ascii=False).encode(), gz=True)
 
         # 静态文件
         rel = path.lstrip("/") or "index.html"

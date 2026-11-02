@@ -343,6 +343,7 @@
       <div class="card">
         <h3>上下文浏览器
           <span class="hint">
+            <input class="inp" id="browSearch" placeholder="搜索内容…" style="width:130px;padding:3px 8px;font-size:11px;margin-right:8px">
             <span class="seg-btns" id="browMode">
               <button class="on" data-m="group">分组</button><button data-m="dna">DNA</button>
             </span>
@@ -358,7 +359,13 @@
           <span class="seg-btns" id="trendMode">
             <button class="on" data-m="total">总量</button><button data-m="delta">增量</button>
           </span>
-          <span class="tiny faint" style="margin-left:6px">最近 90 个请求点 · 日志保留 600 点</span>
+          <span class="seg-btns" id="trendGran">
+            <button class="on" data-g="step">步骤</button><button data-g="turn">轮次</button>
+          </span>
+          <span class="seg-btns" id="trendDur">
+            <button data-d="1">耗时曲线</button>
+          </span>
+          <span class="tiny faint" style="margin-left:6px">最近 90 点 · 日志保留 600</span>
         </span>
       </h3>
       <div class="chart-host" id="trendHost"><div class="tip" id="tip"></div></div>
@@ -427,7 +434,8 @@ let REV = (D && D.rev) || null;
 let LIVE = false;
 
 let state = {
-  sid: D.active, view:'insights', browMode:'group', trendMode:'total', open:new Set(),
+  sid: D.active, view:'insights', browMode:'group', trendMode:'total',
+  trendGran:'step', trendDur:false, browQ:'', open:new Set(),
   f: { hosts: new Set((D.hosts||[]).filter(h=>h.sessions>0).map(h=>h.id)),
        ws:'all', time:'all', q:'', sort:'recent', from:'', to:'', tally:null },
   evKind:'all', foKind:'all'
@@ -626,8 +634,10 @@ function render(s){
   $('#cumIO').textContent = `${s.est?'≈':''}${fmt(t.in)} / ${s.est?'≈':''}${fmt(t.out)}`;
   $('#cumCache').textContent = s.est ? '— 宿主未上报' : `${hit.toFixed(2)}%  (${fmt(t.cached)} 命中)`;
   const crReal = s.creditReal;
-  $('#cumCost').textContent = crReal ? `${crReal} 额度（官方）`
-    : (s.est ? '—' : `¥${t.cost.toFixed(2)}（估算）`);
+  const pu = s.priceUsed;
+  const priceTip = pu ? ` title="¥${pu.input}/M 输入 · ¥${pu.output}/M 输出 · ¥${pu.cache}/M 缓存${pu.peak>1?` · 高峰×${pu.peak}`:''}"` : '';
+  $('#cumCost').innerHTML = crReal ? `${crReal} 额度（官方）`
+    : (s.est ? '—' : `<span${priceTip} style="cursor:help;border-bottom:1px dotted #C7C3F5">¥${t.cost.toFixed(2)}（估算）</span>`);
   $('#cumSpeed').textContent = s.est ? '—' : `${Math.round(t.out / Math.max(1, tm.model))} tok/s`;
   $('#cumTools').textContent = `${s.toolCount} / ${s.files.read+s.files.write+s.files.search}`;
   const cr = s.credits;
@@ -683,15 +693,18 @@ function render(s){
   renderFleet(s);
 
   $('#footNote').innerHTML = `数据：<code>~/.workbuddy-ai/projects/*/*.jsonl</code> · 只读 ·
-    单价假设 缓存 ¥${D.price.cache}/M、输入 ¥${D.price.input}/M、输出 ¥${D.price.output}/M（可在 <code>collect.py</code> 顶部改）·
-    上下文窗口按 ${fmt(D.contextWindow)} 计`;
+    成本按会话主模型的离线价表估算（DeepSeek 类本地 09–21 点高峰翻倍），有官方额度时优先真实额度；
+    未知模型回退 缓存 ¥${D.price.cache}/M、输入 ¥${D.price.input}/M、输出 ¥${D.price.output}/M ·
+    上下文窗口按各会话真实值（缺省 ${fmt(D.contextWindow)}）`;
 }
 
 /* ── 上下文浏览器 ── */
 function renderBrowser(s){
   const host = $('#browser');
-  const items = s.browser;
-  if (!items.length){ host.innerHTML = '<div class="empty">无记录</div>'; return; }
+  let items = s.browser;
+  const q = (state.browQ||'').trim().toLowerCase();
+  if (q) items = items.filter(b => (b.label+' '+b.preview).toLowerCase().includes(q));
+  if (!items.length){ host.innerHTML = q ? '<div class="empty tiny">无匹配「'+esc(state.browQ)+'」</div>' : '<div class="empty">无记录</div>'; return; }
   const last = s.requests[s.requests.length-1];
   const prev = s.requests[s.requests.length-2];
 
@@ -699,7 +712,7 @@ function renderBrowser(s){
     const rev = [...items].reverse();
     host.innerHTML = rev.map((b,i)=>{
       const k = 'dna'+i;
-      return `<div class="bitem" data-k="${k}"><i class="dot" style="background:${CATS[b.cat].c}"></i>
+      return `<div class="bitem" data-k="${k}" data-step="${b.step}" data-cat="${b.cat}" data-label="${esc(b.label)}"><i class="dot" style="background:${CATS[b.cat].c}"></i>
         <span class="tx">${esc(b.label)} · ${esc(b.preview.slice(0,70))}</span>
         <span class="tk num">#${b.step} · ${fmt(b.tok)}</span></div>
         <div class="bitem" data-body="${k}" style="display:none"><span class="tx">${esc(b.preview)}</span></div>`;
@@ -732,7 +745,7 @@ function renderBrowser(s){
       </div>
       ${g.slice().sort((a,b)=>b.tok-a.tok).slice(0,14).map((b,i)=>{
         const kk = k+i;
-        return `<div class="bitem" data-k="${kk}"><i class="dot" style="background:${CATS[k].c};opacity:.5"></i>
+        return `<div class="bitem" data-k="${kk}" data-step="${b.step}" data-cat="${k}" data-label="${esc(b.label)}"><i class="dot" style="background:${CATS[k].c};opacity:.5"></i>
           <span class="tx">${esc(b.preview.slice(0,84).replace(/\n/g,' '))}</span>
           <span class="tk num">#${b.step} · ${fmt(b.tok)}</span></div>
           <div class="bitem" data-body="${kk}" style="display:none"><span class="tx">${esc(b.preview)}</span></div>`;
@@ -751,6 +764,16 @@ function bindItems(host){
       const open = body.style.display !== 'none';
       body.style.display = open ? 'none' : 'flex';
       n.classList.toggle('open', !open);
+      // 实时模式：首次展开按需回读未截断全文（F11）
+      if (!open && LIVE && n.dataset.step != null && !body.dataset.loaded){
+        body.dataset.loaded = '1';
+        const url = `/api/item?sid=${encodeURIComponent(state.sid)}&step=${n.dataset.step}` +
+                    `&cat=${encodeURIComponent(n.dataset.cat)}&label=${encodeURIComponent(n.dataset.label)}`;
+        fetch(url, {cache:'no-store'})
+          .then(r => r.ok ? r.json() : null)
+          .then(j => { if (j && j.text != null){ const tx = body.querySelector('.tx'); if (tx) tx.textContent = j.text; } })
+          .catch(()=>{});
+      }
     };
   });
 }
@@ -760,12 +783,34 @@ function renderTrend(s){
   const host = $('#trendHost');
   const rs = s.requests.slice(-90);
   if (!rs.length) return;
+  const turnMode = state.trendGran === 'turn';
+  // 组装数据点：步骤=每请求一个点；轮次=按 turn 聚合（取末次上下文、累加耗时/输出）
+  let pts = [];
+  if (turnMode){
+    const byTurn = [];
+    rs.forEach(r=>{
+      const t = r.turn||0;
+      let g = byTurn[byTurn.length-1];
+      if (!g || g.turn!==t){ g = {turn:t, reqs:[]}; byTurn.push(g); }
+      g.reqs.push(r);
+    });
+    pts = byTurn.map(g=>{
+      const last = g.reqs[g.reqs.length-1];
+      return { i:last.i, ts:last.ts, in:last.in, cached:last.cached, comp:last.comp,
+        out:g.reqs.reduce((a,r)=>a+r.out,0), ms:g.reqs.reduce((a,r)=>a+r.ms,0),
+        toolMs:g.reqs.reduce((a,r)=>a+(r.toolMs||0),0), stepMin:g.reqs[0].i, stepMax:last.i,
+        label:'轮 '+(g.turn||1), steps:g.reqs.length };
+    });
+  } else {
+    pts = rs.map(r=>({ ...r, ms:r.ms, toolMs:r.toolMs||0, stepMin:r.i, stepMax:r.i,
+      label:'#'+r.i, steps:1 }));
+  }
   const W = Math.max(560, host.clientWidth || 900), H = 210;
-  const padL = 44, padR = 8, padT = 10, padB = 22;
+  const padL = 44, padR = turnMode||state.trendDur ? 40 : 8, padT = 10, padB = 22;
   const iw = W-padL-padR, ih = H-padT-padB;
-  const n = rs.length;
+  const n = pts.length;
   const deltaMode = state.trendMode === 'delta';
-  const vals = rs.map((r,i)=> deltaMode ? (r.in - (rs[i-1]?.in ?? 0)) : r.in);
+  const vals = pts.map((p,i)=> deltaMode ? (p.in - (pts[i-1]?.in ?? 0)) : p.in);
   const maxV = Math.max(1, ...vals);
   const minV = deltaMode ? Math.min(0, ...vals) : 0;
   const span = maxV - minV || 1;
@@ -774,7 +819,6 @@ function renderTrend(s){
   const Y = v => padT + ih * ((maxV - v)/span);
 
   let g = '';
-  // grid
   for (let i=0;i<=3;i++){
     const v = maxV - span*i/3, y = Y(v);
     g += `<line x1="${padL}" x2="${W-padR}" y1="${y}" y2="${y}" stroke="#F0EDE5"/>
@@ -783,8 +827,8 @@ function renderTrend(s){
   if (deltaMode) g += `<line x1="${padL}" x2="${W-padR}" y1="${y0}" y2="${y0}" stroke="#DCD8CC"/>`;
 
   let bars = '';
-  rs.forEach((r,i)=>{
-    if (deltaMode && i===0) return;   // 首个请求无"上一步"可比
+  pts.forEach((p,i)=>{
+    if (deltaMode && i===0) return;
     const x = padL + (iw/n)*i + (iw/n - bw)/2;
     if (deltaMode){
       const v = vals[i], y = Y(v), h = Math.abs(y0-y);
@@ -793,7 +837,7 @@ function renderTrend(s){
     } else {
       let acc = 0;
       ORDER.forEach(k=>{
-        const v = r.comp[k]||0, h = ih*(v/span);
+        const v = p.comp[k]||0, h = ih*(v/span);
         if (h<=0) return;
         bars += `<rect x="${x}" y="${Y(acc+v)}" width="${bw}" height="${Math.max(0.6,h)}"
           fill="${CATS[k].c}" opacity=".9"/>`;
@@ -801,26 +845,37 @@ function renderTrend(s){
       });
     }
   });
-  const lastR = rs[n-1];
+  // 耗时曲线（右轴，模型+工具 秒）
+  let dur = '';
+  if (state.trendDur){
+    const maxMs = Math.max(1, ...pts.map(p=>(p.ms||0)+(p.toolMs||0)));
+    const YD = ms => padT + ih * (1 - Math.min(1, ms/maxMs));
+    const line = pts.map((p,i)=>`${padL + (iw/n)*i + (iw/n)/2},${YD((p.ms||0)+(p.toolMs||0))}`).join(' ');
+    dur = `<polyline points="${line}" fill="none" stroke="#22C55E" stroke-width="1.6" opacity=".9"/>`;
+    for (let i=0;i<=2;i++){
+      const ms = maxMs*i/2, y = YD(ms);
+      dur += `<text x="${W-padR+5}" y="${y+3}" font-size="9" fill="#17864A">${(ms/1000).toFixed(0)}s</text>`;
+    }
+  }
   let ticks = '';
   const tickN = Math.min(7, n);
   for (let i=0;i<tickN;i++){
     const idx = Math.round(i*(n-1)/Math.max(1,tickN-1));
     const x = padL + (iw/n)*idx + (iw/n)/2;
-    ticks += `<text x="${x}" y="${H-5}" text-anchor="middle" font-size="9.5" fill="#9AA1AB">#${rs[idx].i}</text>`;
+    ticks += `<text x="${x}" y="${H-5}" text-anchor="middle" font-size="9.5" fill="#9AA1AB">${turnMode?('T'+pts[idx].turn):('#'+pts[idx].i)}</text>`;
   }
-  // 压缩/重发事件标记（✂）落在对应 step 的柱顶
-  const stepIdx = {}; rs.forEach((r,i)=>stepIdx[r.i]=i);
+  // 压缩/重发事件标记（✂）落在包含该 step 的点顶
   let marks = '';
   (s.events||[]).forEach(e=>{
     if (e.kind!=='compact' && e.kind!=='fork') return;
-    const i = stepIdx[e.step]; if (i==null) return;
-    const x = padL + (iw/n)*i + (iw/n)/2;
+    const idx = pts.findIndex(p=>e.step>=p.stepMin && e.step<=p.stepMax);
+    if (idx<0) return;
+    const x = padL + (iw/n)*idx + (iw/n)/2;
     const col = e.kind==='compact' ? '#F43F5E' : '#F59E0B';
     marks += `<text x="${x}" y="${padT+8}" text-anchor="middle" font-size="9" fill="${col}">✂</text>`;
   });
   host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" height="${H}">
-    ${g}${bars}${ticks}${marks}
+    ${g}${bars}${dur}${ticks}${marks}
     <text x="${padL-6}" y="${padT+4}" text-anchor="end" font-size="9" fill="#B9B3A4">tok</text>
   </svg><div class="tip" id="tip"></div>`;
 
@@ -831,14 +886,15 @@ function renderTrend(s){
     const rel = (ev.clientX - rect.left) / rect.width * W;
     let idx = Math.round((rel - padL - (iw/n)/2) / (iw/n));
     idx = Math.max(0, Math.min(n-1, idx));
-    const r = rs[idx];
-    const d = idx>0 ? r.in - rs[idx-1].in : 0;
-    tip.innerHTML = `<b>#${r.i}</b> · 上下文 ${fmt(r.in)} tokens<br>
-      输出 ${fmt(r.out)} · 缓存 ${fmt(r.cached)}<br>
-      <span style="opacity:.7">${idx>0?('较上一步 '+(d>=0?'+':'')+fmt(d)):'首个请求'}</span>`;
+    const p = pts[idx];
+    const d = idx>0 ? p.in - pts[idx-1].in : 0;
+    const durTxt = state.trendDur ? `<br>模型 ${((p.ms||0)/1000).toFixed(1)}s · 工具 ${((p.toolMs||0)/1000).toFixed(1)}s` : '';
+    tip.innerHTML = `<b>${esc(p.label)}</b>${turnMode?` · ${p.steps} 步`:''} · 上下文 ${fmt(p.in)} tokens<br>
+      输出 ${fmt(p.out)} · 缓存 ${fmt(p.cached)}${durTxt}<br>
+      <span style="opacity:.7">${idx>0?('较上一点 '+(d>=0?'+':'')+fmt(d)):'首个'}</span>`;
     tip.style.opacity = 1;
     const px = (padL + (iw/n)*idx) / W * rect.width;
-    tip.style.left = Math.min(rect.width-150, Math.max(0, px+12)) + 'px';
+    tip.style.left = Math.min(rect.width-160, Math.max(0, px+12)) + 'px';
     tip.style.top = '6px';
   };
   svg.onmouseleave = ()=>{ tip.style.opacity = 0; };
@@ -1054,28 +1110,49 @@ function progOf(cmd){
 function renderHeatmap(){
   const host = $('#heatmap'); if (!host) return;
   const daily = D.daily || {};
-  const cells = [];
   const today = new Date(); today.setHours(0,0,0,0);
-  // 对齐到本周周一结尾的 8 周网格（56 天）
-  const end = new Date(today); end.setDate(end.getDate() + (6 - end.getDay()));
-  const start = new Date(end); start.setDate(start.getDate() - 55);
+  const start = new Date(today);
+  start.setDate(start.getDate() - start.getDay() - 49);   // 8 周前的周日为首格
+  const cells = [];
   let maxv = 1;
-  for (let d=new Date(start); d<=end; d.setDate(d.getDate()+1)){
+  for (let i=0;i<56;i++){
+    const d = new Date(start); d.setDate(d.getDate()+i);
     const k = dayKey(d.getTime());
-    const v = (daily[k]||{}).in || 0; if (v>maxv) maxv=v;
+    const v = (daily[k]||{}).in||0;
+    if (v>maxv) maxv=v;
+    cells.push({k, v, future: d>today, month: d.getMonth()});
   }
-  const color = v => { if(!v) return '#F1EFE8';
-    const t = Math.min(1, Math.log10(v+1)/Math.log10(maxv+1));
-    const a = 0.12 + t*0.88; return `rgba(99,102,241,${a.toFixed(2)})`; };
-  let html = '<div style="display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,14px);gap:3px;width:max-content">';
-  for (let d=new Date(start); d<=end; d.setDate(d.getDate()+1)){
-    const k = dayKey(d.getTime()); const v = (daily[k]||{}).in||0;
-    const dow = d.getDay();
-    if (dow===0 && d>start) html += '</div><div style="display:grid;grid-template-rows:repeat(7,14px);gap:3px">';
-    html += `<div title="${k} · ${fmt(v)} tok" data-day="${k}" style="width:14px;height:14px;border-radius:3px;background:${color(v)};cursor:${v?'pointer':'default'}"></div>`;
-  }
-  html += '</div>';
-  host.innerHTML = html;
+  const color = c => {
+    if (c.future) return 'transparent';
+    if (!c.v) return '#EFEDE6';
+    const t = Math.min(1, Math.log10(c.v+1)/Math.log10(maxv+1));
+    return `rgba(99,102,241,${(0.15+t*0.85).toFixed(2)})`;
+  };
+  // 顶部月份标注（每列一周）
+  let months = '<div style="display:grid;grid-auto-flow:column;grid-auto-columns:15px;gap:3px;font-size:9px;color:#9AA1AB">';
+  let lastM = -1;
+  for (let w=0; w<8; w++){ const c=cells[w*7]; const lbl=(c.month!==lastM)?(c.month+1)+'月':''; lastM=c.month; months += `<div>${lbl}</div>`; }
+  months += '</div>';
+  // 单一网格：grid-auto-flow:column + 7 行 → 56 格自动排成 8 列（周日为首行）
+  let grid = '<div style="display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,15px);grid-auto-columns:15px;gap:3px">';
+  cells.forEach(c=>{
+    grid += `<div title="${c.k}${c.future?'（未来）':' · '+fmt(c.v)+' tok'}" data-day="${c.future?'':c.k}"
+      style="width:15px;height:15px;border-radius:3px;background:${color(c)};${c.future?'border:1px dashed #E7E3D9;':''}cursor:${(!c.future&&c.v)?'pointer':'default'}"></div>`;
+  });
+  grid += '</div>';
+  const wdays = ['日','','二','','四','','六'];
+  let wcol = '<div style="display:grid;grid-template-rows:repeat(7,15px);gap:3px;font-size:9px;color:#9AA1AB;margin-right:5px">';
+  wdays.forEach(w=> wcol += `<div style="height:15px;line-height:15px">${w}</div>`);
+  wcol += '</div>';
+  const legend = `<div style="display:flex;align-items:center;gap:4px;font-size:9.5px;color:#9AA1AB;margin-top:7px">少
+    <span style="width:11px;height:11px;border-radius:2px;background:#EFEDE6"></span>
+    <span style="width:11px;height:11px;border-radius:2px;background:rgba(99,102,241,.4)"></span>
+    <span style="width:11px;height:11px;border-radius:2px;background:rgba(99,102,241,1)"></span> 多
+    <span style="margin-left:8px">峰值 ${fmt(maxv)} tok/天 · 虚线=未来</span></div>`;
+  host.innerHTML = `<div style="display:flex;flex-direction:column;gap:2px;width:max-content">
+      <div style="margin-left:22px">${months}</div>
+      <div style="display:flex">${wcol}${grid}</div>
+      ${legend}</div>`;
   host.querySelectorAll('[data-day]').forEach(c=>{
     if (!c.dataset.day) return;
     c.onclick = ()=>{
@@ -1527,7 +1604,8 @@ function savePrefs(){
     const f = state.f;
     localStorage.setItem(PREF_KEY, JSON.stringify({
       hosts:[...f.hosts], ws:f.ws, time:f.time, from:f.from, to:f.to, sort:f.sort,
-      browMode:state.browMode, trendMode:state.trendMode, view:state.view }));
+      browMode:state.browMode, trendMode:state.trendMode, trendGran:state.trendGran,
+      trendDur:state.trendDur, view:state.view }));
   }catch(e){/* 隐私模式或禁用存储时静默忽略 */}
 }
 function loadPrefs(){
@@ -1538,13 +1616,18 @@ function loadPrefs(){
   ['ws','time','from','to','sort'].forEach(k=>{ if (p[k]!=null) state.f[k]=p[k]; });
   if (p.browMode) state.browMode = p.browMode;
   if (p.trendMode) state.trendMode = p.trendMode;
+  if (p.trendGran) state.trendGran = p.trendGran;
+  if (p.trendDur != null) state.trendDur = !!p.trendDur;
   if (['insights','context','fleet'].includes(p.view)) state._prefView = p.view;
 }
 function applyPrefControls(){
   const setv = (sel,v)=>{ const e=$(sel); if(e && v!=null) e.value=v; };
   setv('#fTime', state.f.time); setv('#fSort', state.f.sort); setv('#fWs', state.f.ws);
   const syncBtn=(sel,m)=>document.querySelectorAll(sel+' button').forEach(b=>b.classList.toggle('on', b.dataset.m===m));
+  const syncGran=(sel,g)=>document.querySelectorAll(sel+' button').forEach(b=>b.classList.toggle('on', b.dataset.g===g));
   syncBtn('#browMode', state.browMode); syncBtn('#trendMode', state.trendMode);
+  syncGran('#trendGran', state.trendGran);
+  const td=$('#trendDur button'); if(td) td.classList.toggle('on', state.trendDur);
 }
 
 function boot(){
@@ -1582,10 +1665,24 @@ function boot(){
     state.browMode = e.target.dataset.m;
     renderBrowser(cur()); savePrefs();
   };
+  let bqt;
+  $('#browSearch').oninput = e=>{ clearTimeout(bqt); bqt=setTimeout(()=>{ state.browQ=e.target.value; renderBrowser(cur()); },140); };
   $('#trendMode').onclick = e=>{
     if (e.target.tagName!=='BUTTON') return;
     [...e.currentTarget.children].forEach(b=>b.classList.toggle('on', b===e.target));
     state.trendMode = e.target.dataset.m;
+    renderTrend(cur()); savePrefs();
+  };
+  $('#trendGran').onclick = e=>{
+    if (e.target.tagName!=='BUTTON') return;
+    [...e.currentTarget.children].forEach(b=>b.classList.toggle('on', b===e.target));
+    state.trendGran = e.target.dataset.g;
+    renderTrend(cur()); savePrefs();
+  };
+  $('#trendDur').onclick = e=>{
+    if (e.target.tagName!=='BUTTON') return;
+    state.trendDur = !state.trendDur;
+    e.target.classList.toggle('on', state.trendDur);
     renderTrend(cur()); savePrefs();
   };
   let rt; window.onresize = ()=>{ clearTimeout(rt); rt=setTimeout(()=>{
