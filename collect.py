@@ -786,6 +786,9 @@ def parse_codex(path):
 # ── 适配器：千问办公 QwenWork（SQLite） ─────────────────────
 QWENWORK_DB = os.path.join(HOME, "AppData", "Roaming", "QwenWorkCN", "data", "agents.db")
 
+# 千问（桌面 Agent）事件流根目录：qwen-agent/<ws>/projects/<pid>/sessions/<sid>/thread-events.jsonl
+QIANWEN_ROOT = os.path.join(HOME, "AppData", "Local", "Qianwen", "User Data", "qwen-agent")
+
 
 def parse_qwenwork(path):
     """一个 sqlite 库里有多条 chat，返回会话列表。该宿主不上报 token，全部为估算。"""
@@ -862,6 +865,132 @@ def parse_qwenwork(path):
     except Exception as e:
         print("  ! qwenwork:", e)
     return out
+
+
+# ── 适配器：千问 Qianwen（桌面 Agent，qwen-agent 事件流）──────
+def _qianwen_parts(path):
+    norm = os.path.normpath(path).split(os.sep)
+    if "qwen-agent" in norm:
+        i = norm.index("qwen-agent")
+        ws = norm[i + 1] if len(norm) > i + 1 else ""
+        pid = norm[i + 3] if len(norm) > i + 3 else ""
+        sid = norm[i + 5] if len(norm) > i + 5 else ""
+        ws_dir = os.path.join(*norm[:i + 2])
+        return ws, pid, sid, ws_dir
+    return "", "", "", ""
+
+
+def _qianwen_project_name(ws_dir, pid):
+    pj = os.path.join(ws_dir, "projects.json")
+    try:
+        with open(pj, encoding="utf-8") as f:
+            data = json.load(f)
+        for p in data.get("projects", []):
+            if p.get("id") == pid:
+                return p.get("name") or ""
+    except Exception:
+        pass
+    return ""
+
+
+def parse_qianwen(path):
+    """千问桌面 Agent：qwen-agent/<ws>/projects/<pid>/sessions/<sid>/thread-events.jsonl
+    事件流：session_meta / turn_started / canonical_item(user-input|message|reasoning|
+    tool-call|tool-output|usage|system) / tool_execution_* / turn_completed。
+    每个 (promptSeq,turnSeq) 组 = 一次模型请求，落地为 b.call（带真实 token）；
+    组内首条 tool-call 当主工具，其余 extra_call；user-input/message/reasoning 分别
+    喂 user/assistant/think。该宿主实报 token，tokens=True。"""
+    ws, pid, sid, ws_dir = _qianwen_parts(path)
+    b = Builder()
+    title = cwd = model_disp = None
+    last_window = last_ctx = 0
+    pending = None   # 当前 (promptSeq,turnSeq) 组：{'key','tools':[(name,cid,args)],'usage','ts'}
+
+    def flush():
+        nonlocal pending
+        g = pending
+        pending = None
+        if not g or not g.get("usage"):
+            return
+        u = g["usage"]
+        usage = {"in": u.get("input_tokens"), "out": u.get("output_tokens"),
+                 "cached": u.get("cache_read_input_tokens")}
+        tools = g["tools"]
+        if not tools:
+            b.call(g["ts"], "对话", "", usage)
+        else:
+            name0, cid0, args0 = tools[0]
+            b.call(g["ts"], name0, args0, usage, call_id=cid0)
+            for nm, cid, ag in tools[1:]:
+                b.extra_call(g["ts"], nm, ag)
+
+    for d in iter_jsonl(path):
+        typ = d.get("type")
+        ts = iso_ms(d.get("timestamp"))
+        if typ == "session_meta":
+            sm = (d.get("payload") or {}).get("session") or {}
+            if sm.get("title") and sm["title"] != "Untitled chat":
+                title = sm["title"]
+            cwd = cwd or sm.get("cwd")
+            m = (sm.get("modelSelection") or {}).get("model") or sm.get("model")
+            if m:
+                model_disp = m
+            continue
+        if typ != "canonical_item":
+            continue
+        it = (d.get("payload") or {}).get("item") or {}
+        kind = it.get("kind")
+        key = (d.get("promptSeq"), it.get("turnSeq"))
+        if kind == "user-input":
+            flush()
+            content = it.get("input", {}).get("content") or []
+            txt = "\n".join(c.get("text") for c in content
+                            if isinstance(c, dict) and c.get("text"))
+            b.user(ts, txt)
+        elif kind == "reasoning":
+            b.think(ts, it.get("text") or "")
+        elif kind == "message":
+            if (it.get("role") or "assistant") == "assistant":
+                b.assistant(ts, it.get("text") or "")
+        elif kind == "tool-call":
+            if pending is None or pending["key"] != key:
+                flush()
+                pending = {"key": key, "tools": [], "usage": None, "ts": ts}
+            pending["tools"].append((it.get("toolName") or "?", it.get("callId"),
+                                    it.get("input") if isinstance(it.get("input"), dict) else {}))
+        elif kind == "tool-output":
+            r = it.get("result") or {}
+            b.result(ts, it.get("toolName") or "tool",
+                     (r.get("content") if isinstance(r, dict) else str(r)) or "", it.get("callId"))
+        elif kind == "usage":
+            u = it.get("usage") or {}
+            base = u.get("context_usage_baseline") or {}
+            mid = base.get("modelId") or model_disp
+            if mid:
+                b.set_model(ts, mid)
+            win = base.get("contextWindow") or 0
+            if win:
+                last_window = win
+            inp = int(u.get("input_tokens") or 0)
+            cached = int(u.get("cache_read_input_tokens") or 0)
+            last_ctx = inp + cached
+            if pending is None or pending["key"] != key:
+                pending = {"key": key, "tools": [], "usage": u, "ts": ts}
+            else:
+                pending["usage"] = u
+            flush()   # 在 usage 处落地该组请求（组内 tool-call 已收集齐）
+    flush()
+
+    s = b.finish({"id": "qn-" + sid, "host": "qianwen",
+                  "title": title, "cwd": cwd,
+                  "project": _qianwen_project_name(ws_dir, pid) or ws})
+    if s:
+        if last_window:
+            s["totals"]["window"] = last_window
+        if last_ctx:
+            s["totals"]["ctx"] = last_ctx
+        s["model"] = model_disp
+    return s
 
 
 # ── 桌面端索引：~/.workbuddy-ai/workbuddy.db ───────────────
@@ -1166,6 +1295,9 @@ HOSTS = [
      "parse": parse_qwen, "home": "~/.qwen/projects"},
     {"id": "qwenwork", "name": "千问办公 QwenWork", "color": "#D97706", "tokens": False,
      "glob": QWENWORK_DB, "parse": parse_qwenwork, "home": "~/AppData/Roaming/QwenWorkCN/data"},
+    {"id": "qianwen", "name": "千问 Qianwen", "color": "#14B8A6", "tokens": True,
+     "glob": os.path.join(QIANWEN_ROOT, "*", "projects", "*", "sessions", "*", "thread-events.jsonl"),
+     "parse": parse_qianwen, "home": "~/AppData/Local/Qianwen/User Data/qwen-agent"},
     {"id": "doubaowork", "name": "豆包工作 DoubaoWork", "color": "#2563EB", "tokens": False,
      "glob": os.path.join(DOUBAOWORK_DIR, "*"), "parse": parse_doubaowork,
      "sig": doubaowork_sig, "home": "~/.doubaowork/.../.sessions"},
