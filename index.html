@@ -665,7 +665,7 @@ function render(s){
   }).join('');
   $('#ctxNote').innerHTML = `斜纹 = 自动压缩预留（窗口 20%）。宿主注入为实测差额推算，其余按字符密度估算后以实报 input 归一。`;
 
-  /* 有官方口径时覆盖为实报（豆包工作 context_window_usage） */
+  /* 有官方口径时覆盖为实报（豆包工作 context_window_usage / MiniMax context_usage 等） */
   const rc = s.realCtx;
   if (rc){
     const RC = [['系统提示词', rc.system, '#6366F1'],
@@ -681,8 +681,9 @@ function render(s){
     $('#legendCtx').innerHTML = RC.map(([n,v,c])=>`<div class="lg">
       <i class="dot" style="background:${c}"></i><span class="nm">${n}</span>
       <span class="vv num">${fmt(v)} <span class="faint" style="font-weight:400">${p1(pct(v,rc.total))}%</span></span></div>`).join('');
-    $('#ctxNote').innerHTML = `数据来自豆包工作官方 <code>context_window_usage</code>（实报，非估算）。
-      逐条请求的 token 仍为估算，因为宿主不上报 usage。`;
+    const usageReal = !!(HOSTMAP[s.host]||{}).tokens;
+    $('#ctxNote').innerHTML = `数据来自宿主官方上下文统计（实报，非估算）。
+      ${usageReal ? '逐条请求的 token 同为宿主实报。' : '逐条请求的 token 仍为估算，因为宿主不上报 usage。'}`;
   }
 
   renderBrowser(s);

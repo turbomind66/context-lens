@@ -11,6 +11,7 @@ context-lens / collect.py  (multi-host)
   · Qwen Code      ~/.qwen/projects/<proj>/chats/<session>.jsonl
   · Claude Code    ~/.claude/projects/<proj>/<session>.jsonl
   · Codex CLI      ~/.codex/sessions/**/rollout-*.jsonl
+  · MiniMax Code   <dataParent>/.minimax/v2/sqlite/runtime-state.sqlite（mavis，真实 token）
 """
 import json, os, glob, ast, collections, datetime, sqlite3, re, struct
 
@@ -1275,6 +1276,173 @@ def parse_doubaowork(session_dir):
                      "cwd": "", "project": "DoubaoWork"})
 
 
+# ── 适配器：MiniMax Code（mavis / pi-agent，SQLite）──────────
+MINIMAX_CONFIG = os.path.join(HOME, "AppData", "Roaming", "MiniMax", "minimax-agent-cn-config.json")
+
+
+def _minimax_db():
+    """真实库在 localRuntimeDataParentDir 指定的盘（本机为 D:）；C 盘 ~/.minimax 只是空壳。
+    读宿主配置拼出候选，挑第一个 local_runtime_sessions 有数据的库。"""
+    cands = [os.path.join(HOME, ".minimax", "v2", "sqlite", "runtime-state.sqlite")]
+    try:
+        with open(MINIMAX_CONFIG, encoding="utf-8") as f:
+            cfg = (json.load(f).get("config") or {})
+        parent = cfg.get("localRuntimeDataParentDir")
+        if parent:
+            cands.insert(0, os.path.join(parent, ".minimax", "v2", "sqlite", "runtime-state.sqlite"))
+        for p in cfg.get("localRuntimePreviousDataParentDirs") or []:
+            cands.append(os.path.join(p, ".minimax", "v2", "sqlite", "runtime-state.sqlite"))
+    except Exception:
+        pass
+    for c in cands:
+        if not os.path.exists(c):
+            continue
+        try:
+            con = _connect_ro(c)
+            n = con.execute("select count(*) from local_runtime_sessions").fetchone()[0]
+            con.close()
+            if n:
+                return c
+        except Exception:
+            pass
+    return cands[-1]
+
+
+MINIMAX_DB = _minimax_db()
+
+
+def minimax_sig(path):
+    """数据在 WAL 里，签名把 -wal/-shm 一起算上，否则缓存不会随新消息刷新。"""
+    vals = []
+    for ext in ("", "-wal", "-shm"):
+        try:
+            st = os.stat(path + ext)
+            vals.append((st.st_mtime_ns, st.st_size))
+        except Exception:
+            pass
+    return (max(v[0] for v in vals) if vals else 0, sum(v[1] for v in vals))
+
+
+def _minimax_result_text(res):
+    """tool_call_result_data → 文本（结构为 {"content":[{"type":"text","text":...}]}）。"""
+    if isinstance(res, str):
+        return res
+    if isinstance(res, dict):
+        parts = res.get("content") or []
+        txt = "\n".join(p.get("text") or "" for p in parts
+                        if isinstance(p, dict) and p.get("type") == "text")
+        return txt or json.dumps(res, ensure_ascii=False)
+    return json.dumps(res, ensure_ascii=False) if res is not None else ""
+
+
+def parse_minimax(path):
+    """MiniMax Code（mavis，pi-agent）：一个 sqlite 库里多条会话。
+    local_runtime_sessions 是会话表，local_runtime_message_rows 是消息流水；
+    assistant 消息的 data_json.usage 带真实 token（input/output/cache_read），
+    context_usage 带官方窗口与上下文构成。tokens=True。"""
+    if not os.path.exists(path):
+        return []
+    out = []
+    try:
+        con = _connect_ro(path)
+        con.row_factory = sqlite3.Row
+        sessions = con.execute(
+            "select session_id,record_json,updated_at_ms from local_runtime_sessions"
+        ).fetchall()
+        for sr in sessions:
+            sid = sr["session_id"]
+            try:
+                rec = json.loads(sr["record_json"] or "{}")
+            except Exception:
+                rec = {}
+            rows = con.execute(
+                "select role,created_at_ms,data_json,source from local_runtime_message_rows "
+                "where session_id=? order by id asc", (sid,)
+            ).fetchall()
+            if not rows:
+                continue
+            b = Builder()
+            cwd = rec.get("workspaceDir") or ""
+            model_disp = None
+            last_window = last_ctx = 0
+            real = None
+            for r in rows:
+                ts = int(r["created_at_ms"] or 0)
+                try:
+                    d = json.loads(r["data_json"] or "{}")
+                except Exception:
+                    d = {}
+                role = r["role"]
+                if role == "user":
+                    b.user(ts, d.get("msg_content") or "")
+                    continue
+                if role != "assistant":
+                    continue                       # msg_type=3 todo 等，不进上下文
+                th = d.get("thinking_content") or ""
+                if th:
+                    b.think(ts, th)
+                cu = d.get("context_usage_telemetry") or {}
+                mid = cu.get("model") or d.get("model")
+                if mid:
+                    model_disp = mid
+                    b.set_model(ts, mid)
+                cux = d.get("context_usage") or {}
+                u = d.get("usage") or {}
+                win = cux.get("contextWindowTokens") or u.get("context_window")
+                if win:
+                    last_window = int(win)
+                comps = cux.get("components") or []
+                if comps:
+                    mp = {"SYSTEM_PROMPT": "system", "MEMORY": "system",
+                          "MESSAGES": "messages", "SKILLS": "skills", "TOOLS": "tools"}
+                    rc = {"system": 0, "messages": 0, "skills": 0, "tools": 0,
+                          "total": int(cux.get("usedTokens") or 0), "window": int(win or 0)}
+                    for c in comps:
+                        k = mp.get(c.get("kind"))
+                        if k:
+                            rc[k] += int(c.get("tokens") or 0)
+                    real = rc
+                usage = {"in": u.get("input_tokens"), "out": u.get("output_tokens"),
+                         "cached": u.get("cache_read")}
+                if usage["in"] is not None:
+                    last_ctx = int(usage["in"] or 0) + int(usage["cached"] or 0)
+                calls = d.get("tool_calls") or []
+                if calls:
+                    first = True
+                    for t in calls:
+                        name = t.get("tool_name") or "?"
+                        args = t.get("tool_call_args")
+                        cid = t.get("tool_call_id")
+                        if first:
+                            b.call(ts, name, args, usage, cid)
+                            first = False
+                        else:
+                            b.extra_call(ts, name, args)
+                        if t.get("tool_call_result_data"):
+                            b.result(ts, name, _minimax_result_text(t["tool_call_result_data"]), cid)
+                else:
+                    b.call(ts, "对话", "", usage)
+                txt = d.get("msg_content") or ""
+                if txt:
+                    b.assistant(ts, txt)
+            s = b.finish({"id": "mm-" + sid, "host": "minimax", "cwd": cwd,
+                          "project": "MiniMax Code"})
+            if s:
+                if last_window:
+                    s["totals"]["window"] = last_window
+                if last_ctx:
+                    s["totals"]["ctx"] = last_ctx
+                if real:
+                    s["realCtx"] = real
+                if model_disp:
+                    s["model"] = model_disp
+                out.append(s)
+        con.close()
+    except Exception as e:
+        print("  ! minimax:", e)
+    return out
+
+
 # ── 宿主注册表 ──────────────────────────────────────────────
 # 注意：WorkBuddy（5.x，~/.workbuddy）与 WorkBuddy AI（~/.workbuddy-ai）是两个不同产品，
 # 数据目录、索引库都是各自独立的一套。
@@ -1307,6 +1475,9 @@ HOSTS = [
     {"id": "codex", "name": "Codex CLI", "color": "#10B981", "tokens": True,
      "glob": os.path.join(HOME, ".codex", "sessions", "**", "rollout-*.jsonl"),
      "parse": parse_codex, "home": "~/.codex/sessions", "recursive": True},
+    {"id": "minimax", "name": "MiniMax Code", "color": "#F43F5E", "tokens": True,
+     "glob": MINIMAX_DB, "parse": parse_minimax, "sig": minimax_sig,
+     "home": "~/.minimax/v2/sqlite（实际在 localRuntimeDataParentDir 盘）"},
 ]
 
 # 已发现但拿不到 token 的 Agent（状态制清点，不进统计）。
