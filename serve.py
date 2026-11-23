@@ -3,7 +3,7 @@
 """
 context-lens / serve.py
 
-本地实时服务：页面每 3 秒拉一次 /api/data，服务端只重新解析"变过"的日志文件
+本地实时服务：页面每 15 秒拉一次 /api/data，服务端只重新解析"变过"的日志文件
 （按 mtime + size 判断），没变化时直接回 unchanged，几乎零开销。
 
     python serve.py            # http://127.0.0.1:8765

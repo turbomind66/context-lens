@@ -1752,7 +1752,7 @@ async function initLive(){
     LIVE = true;
     setLive(true, '实时 · 连接中');
     await poll();
-    pollTimer = setInterval(()=>{ if (!document.hidden) poll(); }, 3000);
+    pollTimer = setInterval(()=>{ if (!document.hidden) poll(); }, 15000);
   }catch(e){
     LIVE = false;
     setLive(false, '静态快照');

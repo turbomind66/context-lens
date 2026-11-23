@@ -1523,6 +1523,20 @@ def probe_all():
 
 
 
+def _rev_stamp(size, mtime_ns=0, mtime_bucket_ns=300_000_000_000, size_bucket=32768):
+    """rev 用的粗化签名：以 size 量化为主（吸收零碎追加），大 mtime 桶兜底。
+    宿主（尤其 WorkBuddy 5.x）活跃写日志时 mtime 每次变、size 每轮只涨几 KB，
+    直接用精确 sig 算 rev 会让前端每轮都判为"数据变了"→ 全量重传 7MB + 全量重绘
+    （实测打开网页就卡、内存暴涨的根因）。日志是 append-only，size 才是内容增长的
+    可靠信号：按 32KB 量化后零碎写入被吸收，累计到量级才刷新；5 分钟 mtime 桶兜底
+    防止 size 不变而内容被重写的情况。注意：只影响 rev（是否重传），cache 命中仍用
+    精确 sig，解析始终最新。"""
+    try:
+        return f"{int(size) // size_bucket}:{int(mtime_ns) // mtime_bucket_ns if mtime_ns else 0}"
+    except Exception:
+        return "0:0"
+
+
 def scan(cache=None, verbose=False):
     """扫一遍所有宿主。cache: {path: {'sig': (mtime_ns,size), 's': [sessions]}}
     只重新解析签名变化的文件，供实时服务复用。"""
@@ -1536,7 +1550,7 @@ def scan(cache=None, verbose=False):
             try:
                 st = os.stat(f)
                 sig = h["sig"](f) if h.get("sig") else (st.st_mtime_ns, st.st_size)
-                rev_parts.append(f"{f}:{sig[0]}:{sig[1]}")
+                rev_parts.append(f"{f}:{_rev_stamp(sig[1], sig[0])}")
                 hit = cache.get(f)
                 if hit and hit["sig"] == sig:
                     got = hit["s"]
@@ -1581,7 +1595,8 @@ def scan(cache=None, verbose=False):
         if db and os.path.exists(db):
             try:
                 st = os.stat(db)
-                rev_parts.append(f"db:{db}:{st.st_mtime_ns}:{st.st_size}")
+                # 索引库 size 常年不变、mtime 频繁抖动，用 60 秒 mtime 桶吸收
+                rev_parts.append(f"db:{db}:{_rev_stamp(st.st_size, st.st_mtime_ns, 60_000_000_000)}")
             except Exception:
                 pass
             idx = read_workbuddy_index(db)
