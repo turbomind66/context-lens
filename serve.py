@@ -94,7 +94,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # 浏览器刷新/关页面/切标签时会主动断开大响应（如 data.js），属正常现象
             pass
 
     def do_GET(self):
@@ -152,6 +153,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        """客户端断开是常态（刷新/关页面打断大响应），别打印整串 traceback 吓人。
+        只对这类连接异常静默，其它真实错误仍交给基类记录。"""
+        import sys as _sys
+        etype, evalue, _tb = _sys.exc_info()
+        if issubclass(etype, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
 
 
 def main():
